@@ -44,6 +44,52 @@ test("sends a Responses JSON request and preserves text and usage", async () => 
   }
 });
 
+test("accepts a Chat Completions envelope returned by a compatible Responses endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        choices: [{ message: { content: "{\"ok\":true}" } }],
+        usage: { prompt_tokens: 5, completion_tokens: 3 },
+      };
+    },
+  }) as Response;
+  try {
+    const client = createApiJsonModelClient({
+      baseUrl: "https://example.test/v1", apiKey: "secret", model: "model-a",
+    });
+    const response = await client.request({ systemPrompt: "system", userPayload: "payload" });
+    assert.deepEqual(response, {
+      text: "{\"ok\":true}",
+      usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("accepts text value objects returned by a compatible Responses endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        output: [{ content: [{ text: { value: "{\"ok\":true}" } }] }],
+      };
+    },
+  }) as Response;
+  try {
+    const client = createApiJsonModelClient({
+      baseUrl: "https://example.test/v1", apiKey: "secret", model: "model-a",
+    });
+    const response = await client.request({ systemPrompt: "system", userPayload: "payload" });
+    assert.equal(response.text, "{\"ok\":true}");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("falls back to Chat Completions and preserves array content usage", async () => {
   const originalFetch = globalThis.fetch;
   const requestedUrls: string[] = [];

@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { WebSocket } from "ws";
 import { reserveUnusedPort } from "@lightrsi/host-adapter";
 import { normalizeTokenPilotCodexConfig } from "../src/config.js";
 import { createConsoleLogger } from "../src/logger.js";
@@ -75,10 +76,12 @@ async function startPureForwardProxy(upstreamBaseUrl: string) {
   const config = normalizeTokenPilotCodexConfig({
     proxyPort,
     stateDir,
+    upstreamProvider: "capture",
     upstream: {
       name: "capture",
       baseUrl: upstreamBaseUrl,
       wireApi: "responses",
+      requiresOpenAIAuth: false,
     },
     proxyMode: { pureForward: true },
     modules: { stabilizer: true, reduction: true },
@@ -312,6 +315,74 @@ test("pure forward abort cancels upstream response without unhandled rejection",
     assert.equal(trace?.stage, "pure_forward_cancelled");
     assert.equal(["request_aborted", "response_close_before_finish"].includes(String(trace?.abortSource)), true);
   } finally {
+    await proxy.runtime.close();
+    await proxy.cleanup();
+    await upstream.close();
+  }
+});
+
+test("Codex Responses WebSocket warmup is retained for the next generated turn", async () => {
+  const streamBody = [
+    'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-generated"}}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-generated","status":"completed","output":[]}}\n\n',
+  ].join("");
+  const upstream = await startWireUpstream({
+    path: "/v1/responses",
+    contentType: "text/event-stream",
+    body: streamBody,
+    responseChunks: [streamBody],
+  });
+  const proxy = await startPureForwardProxy(upstream.baseUrl);
+  const socket = new WebSocket(`${proxy.runtime.baseUrl.replace(/^http/u, "ws")}/responses`);
+  try {
+    const events = await new Promise<Array<Record<string, unknown>>>((resolve, reject) => {
+      const received: Array<Record<string, unknown>> = [];
+      const timer = setTimeout(() => reject(new Error("timed out waiting for warmup continuation")), 5_000);
+      socket.once("error", reject);
+      socket.once("open", () => {
+        socket.send(JSON.stringify({
+          type: "response.create",
+          stream_id: "main",
+          generate: false,
+          model: "gpt-fixture",
+          input: [{ type: "message", role: "developer", content: "stable instructions" }],
+          tools: [],
+        }));
+      });
+      socket.on("message", (data) => {
+        const event = JSON.parse(data.toString()) as Record<string, unknown>;
+        const response = event.response && typeof event.response === "object" && !Array.isArray(event.response)
+          ? event.response as Record<string, unknown>
+          : undefined;
+        received.push(event);
+        if (event.type === "response.completed"
+          && String(response?.id).startsWith("resp_lightrsi_warmup_")) {
+          socket.send(JSON.stringify({
+            type: "response.create",
+            stream_id: "main",
+            previous_response_id: response!.id,
+            model: "gpt-fixture",
+            input: [{ type: "message", role: "user", content: "hello" }],
+          }));
+          return;
+        }
+        if (event.type === "response.completed" && response?.id === "resp-generated") {
+          clearTimeout(timer);
+          resolve(received);
+        }
+      });
+    });
+    assert.equal(events.filter((event) => event.type === "response.completed").length, 2);
+    assert.equal(upstream.requests.length, 1);
+    const forwarded = JSON.parse(upstream.requests[0]!) as Record<string, unknown>;
+    assert.equal(forwarded.previous_response_id, undefined);
+    assert.equal(forwarded.generate, undefined);
+    assert.deepEqual(forwarded.input, [
+      { type: "message", role: "developer", content: "stable instructions" },
+      { type: "message", role: "user", content: "hello" },
+    ]);
+  } finally {
+    socket.close();
     await proxy.runtime.close();
     await proxy.cleanup();
     await upstream.close();

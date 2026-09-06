@@ -112,10 +112,12 @@ Default install:
 corepack pnpm cleaner:install:codex
 ```
 
-This builds and installs the shared CLI, recovery MCP, Codex adapter, and
-restricted `lightrsi-clean` command skill. It keeps your current active Codex
-provider, reroutes it through the local TokenPilot proxy, writes
-`~/.codex/tokenpilot.json`, and registers the required hooks and MCP server.
+This builds and installs the shared CLI, recovery MCP, Codex adapter, and the
+explicit-only `lightrsi-clean`, `lightrsi-clean-status`,
+`lightrsi-clean-apply`, and `lightrsi-clean-cancel` command skills. It keeps
+your current active Codex provider, reroutes it through the local TokenPilot
+proxy, writes `~/.codex/tokenpilot.json`, and registers the required hooks and
+MCP server.
 
 If your Codex config files are not under the default `~/.codex`, set:
 
@@ -150,9 +152,9 @@ corepack pnpm cleaner:install:claude-code
 ```
 
 This builds and installs the shared CLI, recovery MCP, Claude Code adapter, and
-restricted `lightrsi-clean` command skill. It updates local gateway routing,
-registers the required hooks and MCP server, and preserves existing Claude files
-as `.tokenpilot.bak` backups before rewriting.
+the explicit-only Cleaner analysis, status, apply, and cancel command skills. It
+updates local gateway routing, registers the required hooks and MCP server, and
+preserves existing Claude files as `.tokenpilot.bak` backups before rewriting.
 
 If your Claude Code files are not under the default `~/.claude`, set:
 

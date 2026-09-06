@@ -38,7 +38,7 @@ This command:
 - Writes `~/.codex/tokenpilot.json`
 - Registers hooks in `~/.codex/hooks.json`
 - Registers the shared `tokenpilot_memory_fault_recover` MCP server
-- Builds and installs the shared `lightrsi` CLI and the analysis-only `lightrsi-clean` skill
+- Builds and installs the shared `lightrsi` CLI and the explicit-only `lightrsi-clean`, `lightrsi-clean-status`, `lightrsi-clean-apply`, and `lightrsi-clean-cancel` skills
 
 **Custom paths:**
 
@@ -61,7 +61,7 @@ This command:
 - Registers the shared `tokenpilot_memory_fault_recover` MCP server
 - Installs a `SessionStart` hook that auto-starts the gateway
 - Backs up existing Claude files as `.tokenpilot.bak`
-- Builds and installs the shared `lightrsi` CLI and the analysis-only `lightrsi-clean` skill
+- Builds and installs the shared `lightrsi` CLI and the explicit-only Cleaner analysis, status, apply, and cancel skills
 
 **Custom paths:**
 

@@ -32,12 +32,14 @@ import {
   codexSharedContextRewriteBackend,
   commitCodexRebaseEpoch,
   type CodexLifecycleBackendRequestBase,
+  withCodexRebaseReplayAccountingInput,
 } from "../src/context-rewrite/index.js";
 import {
   finalizeCodexCleanerAppliedReceipt,
   finalizeCodexCleanerHandoffFailure,
   prepareCodexCleanerRebase,
   revalidateCodexCleanerPreparedRebase,
+  withCodexCleanerReplayAccounting,
 } from "../src/context-cleaner/runtime.js";
 import {
   appendCodexCleanerCommitted,
@@ -319,6 +321,10 @@ async function seedScheduledClean(
     unassignedChars: 0,
     tokenCountMode: "chars_only",
     tokenCountMethod: "utf16_chars",
+    snapshotItems: snapshot.items.map((item) => ({
+      stableId: item.stableId,
+      fingerprint: item.fingerprint,
+    })),
     tasks: [
       {
         taskId: "task-old",
@@ -401,10 +407,15 @@ test("Codex cleaner runtime prepares only the scheduled manual plan with the exi
   });
 });
 
-test("Codex cleaner runtime marks revision drift stale and preserves the original request", async () => {
+test("Codex cleaner runtime marks selected-item drift stale and preserves the original request", async () => {
   await withTempState(async (stateDir) => {
     const seeded = await seedScheduledClean(stateDir);
     const changedView = sourceView("changed-revision");
+    changedView.history.replayableItems[0] = effective("old-item", {
+      type: "message",
+      role: "user",
+      content: "EVICT_ME_cleaner_runtime_changed_after_analysis",
+    });
     const result = await prepareCodexCleanerRebase({
       stateDir,
       sessionId: SESSION_ID,
@@ -414,7 +425,7 @@ test("Codex cleaner runtime marks revision drift stale and preserves the origina
     });
 
     assert.equal(result.outcome, "stale");
-    assert.deepEqual(result.reasonCodes, ["clean_execution_revision_stale"]);
+    assert.deepEqual(result.reasonCodes, ["clean_execution_item_stale"]);
     const receipt = await readContextCleanReceipt({ stateDir, planId: CLEAN_PLAN_ID });
     assert.equal(receipt.value?.status, "stale");
     assert.equal(receipt.value?.fallbackUsed, false);
@@ -607,6 +618,70 @@ test("Codex cleaner finalizer rejects malformed actual accounting without applyi
     assert.equal(
       (await readCodexCleanerSchedule({ stateDir, sessionId: SESSION_ID })).outcome,
       "ready",
+    );
+  });
+});
+
+test("Codex cleaner finalizer accepts replay accounting refreshed for the final input", async () => {
+  await withTempState(async (stateDir) => {
+    const seeded = await seedScheduledClean(stateDir);
+    const result = await prepareCodexCleanerRebase({
+      stateDir,
+      sessionId: SESSION_ID,
+      view: seeded.view,
+      backendRequest: seeded.request,
+    });
+    assert.equal(result.outcome, "ready");
+    if (result.outcome !== "ready") return;
+
+    const accounting = withCodexRebaseReplayAccountingInput(
+      result.prepared.rebaseRequest.accounting,
+      [
+        ...(result.prepared.rebaseRequest.payload.input as JsonObject[]),
+        { role: "system", content: "RECOVERY_PROTOCOL_added_after_cleaner_prepare" },
+      ],
+    );
+    assert.notEqual(
+      accounting.rebaseReplayCostChars,
+      result.prepared.rebaseRequest.accounting.rebaseReplayCostChars,
+    );
+    const prepared = withCodexCleanerReplayAccounting(result.prepared, accounting);
+    assert.deepEqual(prepared.rebaseRequest.accounting, accounting);
+    assert.deepEqual(prepared.rewriteResult.details?.accounting, accounting);
+
+    await appendPendingCodexRebaseEpoch({
+      stateDir,
+      sessionId: SESSION_ID,
+      planId: prepared.execution.mutationPlan.planId,
+      epochId: "epoch-refreshed-accounting",
+      oldPreviousResponseId: "response-parent",
+      oldRevision: prepared.rebaseRequest.oldRevision,
+      accounting,
+    });
+    const epoch = await commitCodexRebaseEpoch({
+      stateDir,
+      sessionId: SESSION_ID,
+      epochId: "epoch-refreshed-accounting",
+      newResponseId: "response-refreshed-accounting",
+      newRevision: prepared.rebaseRequest.rebaseRevision,
+      accounting,
+      updatedAt: "2026-08-22T00:00:05.000Z",
+    });
+    const finalized = await finalizeCodexCleanerAppliedReceipt({
+      stateDir,
+      sessionId: SESSION_ID,
+      prepared,
+      epoch,
+    });
+
+    assert.equal(finalized.outcome, "applied");
+    assert.equal(
+      (await readContextCleanReceipt({ stateDir, planId: CLEAN_PLAN_ID })).value?.status,
+      "applied",
+    );
+    assert.equal(
+      (await readCodexCleanerSchedule({ stateDir, sessionId: SESSION_ID })).outcome,
+      "committed",
     );
   });
 });

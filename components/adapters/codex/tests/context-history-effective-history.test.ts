@@ -10,6 +10,7 @@ import {
   buildCodexEffectiveHistory,
   buildCodexEffectiveHistoryView,
   codexContextHistoryJournalPath,
+  resolveCodexEffectiveHistoryCurrentInputClosures,
   type JsonObject,
 } from "../src/context-history/index.js";
 
@@ -644,6 +645,75 @@ test("CDH-04 Effective History Builder keeps synthetic item ids stable across re
   assert.deepEqual(await buildWithStates(["completed"]), await buildWithStates(["pending", "completed"]));
 });
 
+test("CDH-04 Effective History Builder keeps synthetic item ids stable across stateless replay turns", async () => {
+  await withTempState(async (stateDir) => {
+    const sessionId = "codex-session-synthetic-stateless-replay";
+    const firstUser = { role: "user", content: "first synthetic request" };
+    const firstAssistant = { role: "assistant", content: "first synthetic answer" };
+
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      turnOrdinal: 1,
+      payload: { input: [firstUser] },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      response: { id: "response-1", output: [firstAssistant] },
+      status: "completed",
+    });
+    const beforeReplay = await buildCodexEffectiveHistoryView({
+      stateDir,
+      sessionId,
+      headResponseId: "response-1",
+    });
+    const frozenIds = beforeReplay.history.replayableItems.map((item) => item.stableItemId);
+
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-2",
+      turnOrdinal: 2,
+      payload: {
+        previous_response_id: "response-1",
+        input: [{ role: "user", content: "second synthetic request" }],
+      },
+      committedInputItems: [
+        firstUser,
+        firstAssistant,
+        { role: "user", content: "second synthetic request" },
+      ],
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-2",
+      previousResponseId: null,
+      response: {
+        id: "response-2",
+        previous_response_id: null,
+        output: [{ role: "assistant", content: "second synthetic answer" }],
+      },
+      status: "completed",
+    });
+
+    const afterReplay = await buildCodexEffectiveHistoryView({
+      stateDir,
+      sessionId,
+      headResponseId: "response-2",
+    });
+    const replayedIds = new Set(afterReplay.history.replayableItems.map((item) => item.stableItemId));
+    assert.equal(afterReplay.semanticComplete, true);
+    assert.deepEqual(afterReplay.reasonCodes, []);
+    assert.ok(frozenIds.every((itemId) => replayedIds.has(itemId)));
+  });
+});
+
 test("CDH-04 Effective History Builder delegates to rollout parser bootstrap when proxy journal is incomplete", async () => {
   await withTempState(async (stateDir) => {
     await appendCodexResponseJournalEntry({
@@ -1220,5 +1290,45 @@ test("CDH-04 Effective History Builder marks unresolved tool calls incomplete", 
 
     assert.equal(history.incomplete, true);
     assert.deepEqual(history.unresolvedCallIds, ["call-1"]);
+  });
+});
+
+test("CDH-04 current tool output closes the committed head for stateless replay", async () => {
+  await withTempState(async (stateDir) => {
+    const sessionId = "codex-session-current-tool-output";
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      payload: { input: [{ role: "user", content: "run tool" }] },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      response: {
+        id: "resp-1",
+        output: [{ type: "custom_tool_call", call_id: "call-1", name: "exec", input: "{}" }],
+      },
+      status: "completed",
+    });
+
+    const view = await buildCodexEffectiveHistoryView({
+      stateDir,
+      sessionId,
+      headResponseId: "resp-1",
+    });
+    assert.equal(view.history.incomplete, true);
+    assert.deepEqual(view.history.unresolvedCallIds, ["call-1"]);
+
+    const closed = resolveCodexEffectiveHistoryCurrentInputClosures({
+      view,
+      currentInput: [{ type: "custom_tool_call_output", call_id: "call-1", output: "ok" }],
+    });
+
+    assert.equal(closed.incomplete, false);
+    assert.deepEqual(closed.unresolvedCallIds, []);
+    assert.equal(closed.revision, view.history.revision);
   });
 });

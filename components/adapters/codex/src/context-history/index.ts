@@ -30,6 +30,7 @@ export type {
 export {
   buildCodexEffectiveHistory,
   buildCodexEffectiveHistoryView,
+  resolveCodexEffectiveHistoryCurrentInputClosures,
 } from "./effective-history.js";
 export { validateCodexRolloutBootstrap } from "./rollout-bootstrap.js";
 export type {

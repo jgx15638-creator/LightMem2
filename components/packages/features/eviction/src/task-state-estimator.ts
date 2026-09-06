@@ -278,14 +278,31 @@ function parseEstimatorOutput(
 ): TaskStateEstimatorOutput {
   const trimmed = rawText.trim();
   if (!trimmed) {
-    throw new Error("task-state estimator returned empty response");
+    throw new Error("task_state_estimator_empty_response");
   }
-  const parsed = JSON.parse(trimmed) as TaskStateEstimatorOutput;
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim();
+  const candidates = uniqueStrings([
+    fenced ?? trimmed,
+    trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1),
+  ]);
+  let parsed: TaskStateEstimatorOutput | undefined;
+  for (const candidate of candidates) {
+    if (!candidate.startsWith("{") || !candidate.endsWith("}")) continue;
+    try {
+      parsed = JSON.parse(candidate) as TaskStateEstimatorOutput;
+      break;
+    } catch {
+      // Try the next bounded JSON candidate without retaining provider text.
+    }
+  }
+  if (!parsed) {
+    throw new Error("task_state_estimator_invalid_json");
+  }
   if (typeof parsed?.baseVersion !== "number") {
-    throw new Error("task-state estimator output missing baseVersion");
+    throw new Error("task_state_estimator_missing_base_version");
   }
   if (!Array.isArray(parsed.taskUpdates)) {
-    throw new Error("task-state estimator output missing taskUpdates");
+    throw new Error("task_state_estimator_missing_task_updates");
   }
   return normalizeEstimatorOutput(parsed, input);
 }

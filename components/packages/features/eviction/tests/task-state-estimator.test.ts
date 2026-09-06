@@ -137,3 +137,35 @@ test("task-state estimator leaves null provider cost unknown", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("task-state estimator accepts a fenced JSON object from compatible providers", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        output: [{
+          type: "message",
+          content: [{
+            type: "output_text",
+            text: "```json\n{\"baseVersion\":1,\"taskUpdates\":[]}\n```",
+          }],
+        }],
+      };
+    },
+  } as Response);
+  try {
+    const estimator = createApiTaskStateEstimator({
+      baseUrl: "https://example.test/v1",
+      apiKey: "test-key",
+      model: "test-model",
+    });
+    assert.deepEqual(await estimator.estimate(estimatorInput), {
+      baseVersion: 1,
+      taskUpdates: [],
+      usage: undefined,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

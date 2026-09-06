@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 import {
   closeHttpServer,
   listenHttpServer,
-  readHttpRequestBody,
+  readHttpRequestBodyBuffer,
   sendJsonResponse,
 } from "./http-server.js";
 
@@ -14,14 +15,27 @@ export type HostGatewayRuntimeServer = {
 export async function startHostGatewayRuntimeServer(params: {
   port: number;
   requestPath: string;
+  requestPaths?: readonly string[];
+  maxRequestBodyBytes?: number;
   basePath?: string;
   healthPayload: unknown;
+  decodeRequestBody?(args: {
+    req: IncomingMessage;
+    body: Buffer;
+  }): string | Promise<string>;
   handleRoute?(args: {
     req: IncomingMessage;
     res: ServerResponse;
     pathname: string;
     readBody(signal?: AbortSignal): Promise<string>;
+    readBodyBuffer(signal?: AbortSignal): Promise<Buffer>;
   }): Promise<boolean | void>;
+  handleUpgrade?(args: {
+    req: IncomingMessage;
+    socket: Duplex;
+    head: Buffer;
+    pathname: string;
+  }): Promise<boolean | void> | boolean | void;
   handleRequest(args: {
     req: IncomingMessage;
     res: ServerResponse;
@@ -35,12 +49,23 @@ export async function startHostGatewayRuntimeServer(params: {
   }): Promise<void>;
 }): Promise<HostGatewayRuntimeServer> {
   const basePath = params.basePath ?? "/v1";
+  const requestPaths = new Set(params.requestPaths ?? [params.requestPath]);
   const server = createServer(async (req, res) => {
     try {
+      let bodyBufferPromise: Promise<Buffer> | null = null;
       let bodyPromise: Promise<string> | null = null;
       const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+      const readBodyBuffer = (signal?: AbortSignal) => {
+        bodyBufferPromise ??= readHttpRequestBodyBuffer(req, {
+          signal,
+          maxBytes: params.maxRequestBodyBytes,
+        });
+        return bodyBufferPromise;
+      };
       const readBody = (signal?: AbortSignal) => {
-        bodyPromise ??= readHttpRequestBody(req, signal);
+        bodyPromise ??= readBodyBuffer(signal).then((body) => params.decodeRequestBody
+          ? params.decodeRequestBody({ req, body })
+          : body.toString("utf8"));
         return bodyPromise;
       };
       if (req.method === "GET" && pathname === "/health") {
@@ -53,10 +78,11 @@ export async function startHostGatewayRuntimeServer(params: {
           res,
           pathname,
           readBody,
+          readBodyBuffer,
         });
         if (handled) return;
       }
-      if (req.method !== "POST" || pathname !== params.requestPath) {
+      if (req.method !== "POST" || !requestPaths.has(pathname)) {
         sendJsonResponse(res, 404, { error: "not found" });
         return;
       }
@@ -77,6 +103,19 @@ export async function startHostGatewayRuntimeServer(params: {
       });
     }
   });
+
+  if (params.handleUpgrade) {
+    server.on("upgrade", (req, socket, head) => {
+      const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+      Promise.resolve(params.handleUpgrade!({ req, socket, head, pathname }))
+        .then((handled) => {
+          if (!handled && !socket.destroyed) socket.destroy();
+        })
+        .catch(() => {
+          if (!socket.destroyed) socket.destroy();
+        });
+    });
+  }
 
   await listenHttpServer(server, params.port);
 

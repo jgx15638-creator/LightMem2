@@ -31,6 +31,7 @@ import {
   readCodexRebaseEpochJournal,
 } from "../context-rewrite/rebase-epoch.js";
 import type {
+  CodexRebaseAccounting,
   CodexRebaseEpoch,
   CodexRebaseRequestResult,
 } from "../context-rewrite/types.js";
@@ -66,6 +67,27 @@ export type CodexCleanerPreparedRebase = {
   rewriteResult: ContextRewriteResult<CodexSharedBackendDetails>;
   rebaseRequest: CodexRebaseRequestResult;
 };
+
+export function withCodexCleanerReplayAccounting(
+  prepared: CodexCleanerPreparedRebase,
+  accounting: CodexRebaseAccounting,
+): CodexCleanerPreparedRebase {
+  if (!prepared.rewriteResult.details) return prepared;
+  return {
+    ...prepared,
+    rewriteResult: {
+      ...prepared.rewriteResult,
+      details: {
+        ...prepared.rewriteResult.details,
+        accounting,
+      },
+    },
+    rebaseRequest: {
+      ...prepared.rebaseRequest,
+      accounting,
+    },
+  };
+}
 
 export type CodexCleanerRuntimeResult =
   | { outcome: "absent"; reasonCodes: [] }

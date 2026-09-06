@@ -4,7 +4,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { withContextCleanStoreLock } from "../src/clean-store-support.js";
+import {
+  parseContextCleanPlan,
+  withContextCleanStoreLock,
+} from "../src/clean-store-support.js";
+import { samplePlan } from "./fixtures.js";
+
+test("plan parser preserves a valid append-only baseline and rejects ambiguous metadata", () => {
+  const snapshotItems = [
+    { stableId: "item-a", fingerprint: "digest-a" },
+    { stableId: "item-b", fingerprint: "digest-b" },
+  ];
+  const valid = parseContextCleanPlan({ ...samplePlan(), snapshotItems });
+  assert.deepEqual(valid?.snapshotItems, snapshotItems);
+  assert.equal(parseContextCleanPlan({
+    ...samplePlan(),
+    snapshotItems: [snapshotItems[0], snapshotItems[0]],
+  }), undefined);
+  assert.equal(parseContextCleanPlan({
+    ...samplePlan(),
+    snapshotItems: [{ stableId: "item-a", fingerprint: "" }],
+  }), undefined);
+});
 
 test("clean store lock waits for its owner when the wall clock jumps forward", async () => {
   const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-clean-store-monotonic-"));

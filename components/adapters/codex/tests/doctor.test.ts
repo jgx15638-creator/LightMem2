@@ -85,6 +85,46 @@ test("inspectCodexDoctor reports missing provider and hooks honestly", async () 
   }
 });
 
+test("inspectCodexDoctor recognizes built-in OpenAI HTTP, ChatGPT backend, and Responses WebSocket routing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lightrsi-codex-doctor-managed-openai-"));
+  try {
+    const proxyPort = await reserveUnusedPort();
+    const codexConfigPath = join(dir, "config.toml");
+    const hooksConfigPath = join(dir, "hooks.json");
+    const tokenPilotConfigPath = join(dir, "tokenpilot.json");
+    await writeFile(codexConfigPath, [
+      'model_provider = "openai"',
+      `openai_base_url = "http://127.0.0.1:${proxyPort}/v1"`,
+      "",
+    ].join("\n"), "utf8");
+    await writeFile(hooksConfigPath, JSON.stringify({ hooks: {} }), "utf8");
+    const report = await inspectCodexDoctor({
+      config: normalizeTokenPilotCodexConfig({
+        providerName: "openai",
+        upstreamProvider: "openai",
+        proxyPort,
+        stateDir: join(dir, "state"),
+      }),
+      configPath: codexConfigPath,
+      hooksConfigPath,
+      tokenPilotConfigPath,
+    });
+    assert.equal(report.providerInstalled, true);
+    assert.equal(report.providerActive, true);
+    assert.equal(report.providerIntercepted, true);
+    assert.equal(report.managedOpenAIProvider, true);
+    assert.equal(report.openAIBaseUrlIntercepted, true);
+    assert.equal(report.chatGptBackendRoutingConfigured, true);
+    assert.equal(report.responsesWebSocketRoutingConfigured, true);
+    const text = formatCodexDoctorReport(report);
+    assert.match(text, /managed OpenAI provider mode: yes/);
+    assert.match(text, /ChatGPT Codex backend routing configured: yes/);
+    assert.match(text, /Responses WebSocket routing configured: yes/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("inspectCodexDoctor reports incomplete estimator config without leaking secrets", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-codex-doctor-estimator-"));
   try {
@@ -425,6 +465,8 @@ test("inspectCodexDoctor treats a non-tokenpilot active provider as healthy when
     assert.equal(report.providerInstalled, true);
     assert.equal(report.providerActive, true);
     assert.equal(report.providerIntercepted, true);
+    assert.equal(report.responsesWebSocketRoutingConfigured, true);
+    assert.equal(report.chatGptBackendRoutingConfigured, false);
     assert.equal(report.proxyHealthy, true);
     assert.equal(report.coreRuntimeHealthy, true);
   } finally {

@@ -165,6 +165,9 @@ test("installCodexTokenPilot writes provider, MCP, and hooks with expected comma
       "lightrsi-doctor",
       "lightrsi-visual",
       "lightrsi-clean",
+      "lightrsi-clean-status",
+      "lightrsi-clean-apply",
+      "lightrsi-clean-cancel",
     ]);
     assert.equal(result.cliBinInstalled, true);
     assert.equal(result.cliBinPath, join(cliBinDir, "lightrsi"));
@@ -202,6 +205,10 @@ test("installCodexTokenPilot writes provider, MCP, and hooks with expected comma
     assert.match(policyRaw, /allow_implicit_invocation:\s*false/);
     const cleanSkillRaw = await readFile(join(result.commandSkillsDir, "lightrsi-clean", "SKILL.md"), "utf8");
     assert.match(cleanSkillRaw, /^   lightrsi codex clean$/m);
+    assert.ok(
+      cleanSkillRaw.indexOf("   node ") < cleanSkillRaw.indexOf("   lightrsi codex clean"),
+      "the skill must prefer its version-pinned bundled CLI over an older PATH command",
+    );
     assert.doesNotMatch(cleanSkillRaw, /^   lightrsi codex clean\s+--/m);
     assert.match(cleanSkillRaw, /Never choose task IDs, item IDs, item digests, or deletion ranges/);
     assert.match(cleanSkillRaw, /Never add `--plan`, `--select`, `--status`, or `--cancel`/);
@@ -410,8 +417,12 @@ test("installCodexTokenPilot does not treat a fresh default install as an upstre
     });
 
     const tokenPilotConfig = await loadTokenPilotCodexConfig(tokenPilotConfigPath);
-    assert.equal(tokenPilotConfig.upstream?.baseUrl, undefined);
-    assert.equal(tokenPilotConfig.upstreamProvider, "OpenAI");
+    assert.equal(tokenPilotConfig.upstream?.baseUrl, "https://api.openai.com/v1");
+    assert.equal(tokenPilotConfig.upstreamProvider, "openai");
+    const codexToml = await readFile(codexConfigPath, "utf8");
+    assert.match(codexToml, /model_provider = "openai"/);
+    assert.match(codexToml, /openai_base_url = "http:\/\/127\.0\.0\.1:\d+\/v1"/);
+    assert.doesNotMatch(codexToml, /chatgpt_base_url\s*=/);
     const report = await inspectCodexDoctor({
       config: tokenPilotConfig,
       configPath: codexConfigPath,
@@ -419,7 +430,7 @@ test("installCodexTokenPilot does not treat a fresh default install as an upstre
       tokenPilotConfigPath,
     });
     assert.equal(report.upstreamLoopDetected, false);
-    assert.equal(report.upstreamBaseUrl, undefined);
+    assert.equal(report.upstreamBaseUrl, "https://api.openai.com/v1");
   } finally {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
@@ -451,7 +462,10 @@ test("installCodexTokenPilot writes Windows hook wrappers into hooks.json", asyn
       platform: "win32",
     });
 
-    assert.match(result.expectedHookCommand, /tokenpilot-codex-hook\.cmd"$/);
+    assert.match(
+      result.expectedHookCommand,
+      /^powershell\.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[^\r\n]*tokenpilot-codex-hook\.ps1"$/,
+    );
 
     const hooks = JSON.parse(await readFile(hooksConfigPath, "utf8")) as {
       hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
@@ -459,7 +473,10 @@ test("installCodexTokenPilot writes Windows hook wrappers into hooks.json", asyn
     for (const eventName of ["SessionStart", "PreToolUse", "PostToolUse"]) {
       const entries = hooks.hooks?.[eventName]?.[0]?.hooks;
       assert.ok(Array.isArray(entries), `${eventName} hook group missing`);
-      assert.match(String(entries[0]?.command ?? ""), /tokenpilot-codex-hook\.cmd"$/);
+      assert.match(
+        String(entries[0]?.command ?? ""),
+        /^powershell\.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[^\r\n]*tokenpilot-codex-hook\.ps1"$/,
+      );
     }
     assert.equal(hooks.hooks?.Stop, undefined);
   } finally {
@@ -554,7 +571,7 @@ test("installCodexTokenPilot shifts the proxy port when the preferred port is al
   }
 });
 
-test("installCodexTokenPilot routes the reserved built-in openai provider through a custom proxy provider", async () => {
+test("installCodexTokenPilot preserves the built-in openai provider and routes it through openai_base_url", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-codex-install-builtin-openai-"));
   try {
     const codexConfigPath = join(dir, "config.toml");
@@ -562,6 +579,8 @@ test("installCodexTokenPilot routes the reserved built-in openai provider throug
     const tokenPilotConfigPath = join(dir, "tokenpilot.json");
     await writeFile(codexConfigPath, [
       "model_provider = \"openai\"",
+      "chatgpt_base_url = \"https://chatgpt.example/backend-api\"",
+      "experimental_realtime_ws_base_url = \"wss://realtime.example/v1\"",
       "",
       "[model_providers.openai]",
       "base_url = \"https://invalid.example/v1\"",
@@ -577,13 +596,67 @@ test("installCodexTokenPilot routes the reserved built-in openai provider throug
 
     const codexToml = await readFile(codexConfigPath, "utf8");
     const tokenPilotConfig = await loadTokenPilotCodexConfig(tokenPilotConfigPath);
-    assert.match(codexToml, /model_provider = "tokenpilot-openai"/);
-    assert.match(codexToml, /\[model_providers\.tokenpilot-openai\][\s\S]*base_url = "http:\/\/127\.0\.0\.1:\d+\/v1"/);
+    assert.match(codexToml, /model_provider = "openai"/);
+    assert.match(codexToml, /openai_base_url = "http:\/\/127\.0\.0\.1:\d+\/v1"/);
+    assert.match(codexToml, /chatgpt_base_url = "https:\/\/chatgpt\.example\/backend-api"/);
+    assert.match(codexToml, /experimental_realtime_ws_base_url = "wss:\/\/realtime\.example\/v1"/);
+    assert.doesNotMatch(codexToml, /\[model_providers\.tokenpilot-openai\]/);
     assert.doesNotMatch(codexToml, /\[model_providers\.openai\]/);
-    assert.equal(result.providerName, "tokenpilot-openai");
-    assert.equal(tokenPilotConfig.providerName, "tokenpilot-openai");
+    assert.equal(result.providerName, "openai");
+    assert.equal(tokenPilotConfig.providerName, "openai");
     assert.equal(tokenPilotConfig.upstreamProvider, "openai");
     assert.equal(tokenPilotConfig.upstream?.baseUrl, "https://api.openai.com/v1");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("installCodexTokenPilot migrates the legacy tokenpilot-openai provider without capturing the loopback as upstream", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lightrsi-codex-install-legacy-openai-"));
+  try {
+    const codexConfigPath = join(dir, "config.toml");
+    const hooksConfigPath = join(dir, "hooks.json");
+    const tokenPilotConfigPath = join(dir, "tokenpilot.json");
+    const existing = normalizeTokenPilotCodexConfig({
+      proxyPort: 17668,
+      providerName: "tokenpilot-openai",
+      upstreamProvider: "openai",
+      upstream: {
+        name: "OpenAI",
+        baseUrl: "https://api.openai.com/v1",
+        wireApi: "responses",
+        requiresOpenAIAuth: true,
+      },
+    });
+    await writeTokenPilotCodexConfig(existing, tokenPilotConfigPath);
+    await writeFile(codexConfigPath, [
+      'model_provider = "tokenpilot-openai"',
+      "",
+      "[model_providers.tokenpilot-openai]",
+      'name = "OpenAI"',
+      'base_url = "http://127.0.0.1:17668/v1"',
+      'wire_api = "responses"',
+      "requires_openai_auth = true",
+      "",
+    ].join("\n"), "utf8");
+
+    const result = await installCodexTokenPilot({
+      codexConfigPath,
+      hooksConfigPath,
+      tokenPilotConfigPath,
+      probeMcp: false,
+    });
+
+    const codexToml = await readFile(codexConfigPath, "utf8");
+    const config = await loadTokenPilotCodexConfig(tokenPilotConfigPath);
+    assert.equal(result.providerName, "openai");
+    assert.equal(config.providerName, "openai");
+    assert.equal(config.upstreamProvider, "openai");
+    assert.equal(config.upstream?.baseUrl, "https://api.openai.com/v1");
+    assert.match(codexToml, /model_provider = "openai"/);
+    assert.match(codexToml, /openai_base_url = "http:\/\/127\.0\.0\.1:\d+\/v1"/);
+    assert.doesNotMatch(codexToml, /chatgpt_base_url\s*=/);
+    assert.doesNotMatch(codexToml, /\[model_providers\.tokenpilot-openai\]/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -743,7 +816,14 @@ test("resolveCodexHookCommandForInstall finds the adapter root from the bundled 
     process.chdir(dirname(repoRoot));
     const windowsCommand = await resolveCodexHookCommandForInstall("win32", bundledCliModuleDir);
     assert.deepEqual(parseGeneratedShellCommand(windowsCommand), [
-      join(adapterDistDir, "tokenpilot-codex-hook.cmd"),
+      "powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      join(adapterDistDir, "tokenpilot-codex-hook.ps1"),
     ]);
 
     const posixCommand = await resolveCodexHookCommandForInstall("linux", bundledCliModuleDir);

@@ -12,7 +12,14 @@ import {
   type ModelContextSnapshot,
 } from "@lightrsi/host-adapter";
 
-import { buildCodexEffectiveHistoryView, parseCodexRollout } from "../context-history/index.js";
+import {
+  buildCodexEffectiveHistoryView,
+  parseCodexRollout,
+  readCodexContextHistoryJournal,
+  type CodexContextHistoryJournalEntry,
+  type CodexEffectiveHistoryView,
+  type CodexResponseJournalEntry,
+} from "../context-history/index.js";
 import { codexSharedContextRewriteBackend } from "../context-rewrite/backend.js";
 import { buildCodexLifecycleBackendRequest } from "../context-rewrite/lifecycle-input.js";
 import {
@@ -22,6 +29,124 @@ import { scheduleCodexCleanerPlan } from "./scheduler.js";
 import { listCodexCleanerSessions } from "./session-catalog.js";
 
 const CODEX_HOST_ID = "codex";
+
+type CleanerSnapshotSource = {
+  view: CodexEffectiveHistoryView;
+  headResponseId?: string;
+  capturedAt: string;
+};
+
+function completeCleanerView(view: CodexEffectiveHistoryView): boolean {
+  return !view.history.incomplete
+    && view.semanticComplete
+    && view.reasonCodes.length === 0
+    && view.history.deferredItems.length === 0
+    && view.history.unresolvedCallIds.length === 0;
+}
+
+function cleanerAnalysisToolCall(item: Record<string, unknown>): boolean {
+  if (item.type !== "custom_tool_call" && item.type !== "function_call") return false;
+  let command = [item.name, item.input, item.arguments]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+  for (let pass = 0; pass < 4; pass += 1) {
+    const decoded = command
+      .replace(/\\\\/g, "\\")
+      .replace(/\\(["'])/g, "$1");
+    if (decoded === command) break;
+    command = decoded;
+  }
+  return /\blightrsi(?:\.cmd|\.exe)?\s+codex\s+clean(?:\s|$)/i.test(command)
+    || /(?:^|[\\/])dist[\\/](?:cli|lightrsi)\.js[\s\S]*?["']codex["'][\s\S]*?["']clean["']/i.test(command);
+}
+
+function responseForHead(
+  entries: readonly CodexContextHistoryJournalEntry[],
+  responseId: string,
+): CodexResponseJournalEntry | undefined {
+  return [...entries].reverse().find((entry): entry is CodexResponseJournalEntry => (
+    entry.kind === "response"
+    && entry.status === "completed"
+    && entry.responseId === responseId
+  ));
+}
+
+function parentResponseId(
+  entries: readonly CodexContextHistoryJournalEntry[],
+  response: CodexResponseJournalEntry,
+): string | undefined {
+  const responseParent = typeof response.previousResponseId === "string"
+    ? response.previousResponseId.trim()
+    : "";
+  if (responseParent) return responseParent;
+  if (!response.requestId) return undefined;
+  const request = [...entries].reverse().find((entry) => (
+    entry.kind === "request"
+    && entry.requestId === response.requestId
+    && entry.status !== "failed"
+  ));
+  return request?.kind === "request" ? request.previousResponseId?.trim() || undefined : undefined;
+}
+
+async function readCleanerSnapshotSource(params: {
+  stateDir: string;
+  sessionId: string;
+  session: Awaited<ReturnType<typeof loadCodexSessionSnapshot>> & {};
+  currentCodexSessionId?: string;
+}): Promise<CleanerSnapshotSource> {
+  const buildView = (headResponseId: string | undefined, withRollout: boolean) => (
+    buildCodexEffectiveHistoryView({
+      stateDir: params.stateDir,
+      sessionId: params.sessionId,
+      headResponseId,
+      ...(withRollout
+        ? {
+            async rolloutViewBootstrap() {
+              if (!params.session.transcriptPath) return null;
+              return (await parseCodexRollout(params.session.transcriptPath))?.view ?? null;
+            },
+          }
+        : {}),
+    })
+  );
+  const initial = await buildView(params.session.latestResponseId, true);
+  const fallback = {
+    view: initial,
+    headResponseId: params.session.latestResponseId,
+    capturedAt: params.session.updatedAt,
+  };
+  if (completeCleanerView(initial)) return fallback;
+
+  const currentCodexSessionId = params.currentCodexSessionId?.trim();
+  if (!currentCodexSessionId || currentCodexSessionId !== params.session.codexSessionId) {
+    return fallback;
+  }
+  const latestResponseId = params.session.latestResponseId?.trim();
+  if (!latestResponseId) return fallback;
+
+  const journal = await readCodexContextHistoryJournal(params.stateDir, params.sessionId);
+  if (journal.readError || journal.malformedLineCount > 0) return fallback;
+  const latestResponse = responseForHead(journal.entries, latestResponseId);
+  if (!latestResponse || !latestResponse.outputItems.some(cleanerAnalysisToolCall)) return fallback;
+
+  const visited = new Set<string>([latestResponseId]);
+  let candidateId = parentResponseId(journal.entries, latestResponse);
+  while (candidateId && !visited.has(candidateId)) {
+    visited.add(candidateId);
+    const candidateResponse = responseForHead(journal.entries, candidateId);
+    if (!candidateResponse) return fallback;
+    const candidateView = await buildView(candidateId, false);
+    if (completeCleanerView(candidateView)) {
+      return {
+        view: candidateView,
+        headResponseId: candidateId,
+        capturedAt: candidateResponse.observedAt,
+      };
+    }
+    candidateId = parentResponseId(journal.entries, candidateResponse);
+  }
+  return fallback;
+}
 
 function canonicalTimestamp(value: string): boolean {
   const timestamp = Date.parse(value);
@@ -164,6 +289,7 @@ function validPersistableSnapshot(
 export function createCodexContextCleanerBridge(params: {
   stateDir: string;
   controlPlane: ContextCleanerControlPlane;
+  currentCodexSessionId?: string;
 }): ContextCleanerHostBridge {
   return {
     hostId: CODEX_HOST_ID,
@@ -174,20 +300,14 @@ export function createCodexContextCleanerBridge(params: {
     async readCleanSnapshot(sessionId) {
       const session = await loadCodexSessionSnapshot(params.stateDir, sessionId);
       if (!session) throw new Error("codex_clean_session_not_found");
-      const view = await buildCodexEffectiveHistoryView({
+      const source = await readCleanerSnapshotSource({
         stateDir: params.stateDir,
         sessionId,
-        headResponseId: session.latestResponseId,
-        async rolloutViewBootstrap() {
-          if (!session.transcriptPath) return null;
-          return (await parseCodexRollout(session.transcriptPath))?.view ?? null;
-        },
+        session,
+        currentCodexSessionId: params.currentCodexSessionId,
       });
-      if (view.history.incomplete
-        || !view.semanticComplete
-        || view.reasonCodes.length > 0
-        || view.history.deferredItems.length > 0
-        || view.history.unresolvedCallIds.length > 0) {
+      const { view } = source;
+      if (!completeCleanerView(view)) {
         throw new Error("codex_clean_snapshot_incomplete");
       }
       const registry = await loadSessionTaskRegistry(params.stateDir, sessionId);
@@ -202,8 +322,8 @@ export function createCodexContextCleanerBridge(params: {
           sessionId,
           payload: {
             ...(model ? { model } : {}),
-            ...(session.latestResponseId
-              ? { previous_response_id: session.latestResponseId }
+            ...(source.headResponseId
+              ? { previous_response_id: source.headResponseId }
               : {}),
             input: [],
           },
@@ -245,7 +365,7 @@ export function createCodexContextCleanerBridge(params: {
       const exact = counts.length > 0 && counts.every(([, count]) => count.mode === "openai_tokens");
       return {
         ...persistableSnapshot,
-        capturedAt: session.updatedAt,
+        capturedAt: source.capturedAt,
         ...(model ? { model } : {}),
         tokenCountMode: exact ? "exact" : "chars_only",
         tokenCountMethod: exact ? "openai_tokenizer" : "utf16_chars",

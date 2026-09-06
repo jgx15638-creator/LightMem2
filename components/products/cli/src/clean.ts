@@ -160,7 +160,7 @@ export async function handleCleanCommand(params: {
     return { text: await approveSelection(params.backend, plan, parsed.selectedTaskIds) };
   }
 
-  const sessionId = parsed.sessionId ?? params.sessionId?.trim();
+  const sessionId = params.sessionId?.trim() || parsed.sessionId;
   if (!sessionId) throw new Error("clean_session_id_missing");
   const plan = await params.backend.analyze(sessionId);
   const rendered = renderCleanPlan(plan);

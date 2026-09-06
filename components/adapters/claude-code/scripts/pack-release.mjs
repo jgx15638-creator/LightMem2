@@ -68,12 +68,12 @@ function runPack(packageDir, cacheDir) {
 }
 
 async function main() {
-  const packDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-pack-"));
+  const packDir = await mkdtemp(join(tmpdir(), "lightrsi-claude-code-pack-"));
   try {
     const packageDir = join(packDir, "package");
     const distDir = join(packageDir, "dist");
     await mkdir(distDir, { recursive: true });
-    for (const file of ["index.js", "cli.js", "hooks-handler.js", "install-codex.js"]) {
+    for (const file of ["index.js", "cli.js", "hooks-handler.js", "install-claude-code.js"]) {
       await copyFile(join(adapterDir, "dist", file), join(distDir, file));
     }
     await copyFile(

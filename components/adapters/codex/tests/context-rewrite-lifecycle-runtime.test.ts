@@ -27,15 +27,18 @@ async function readBody(req: Parameters<Parameters<typeof createServer>[0]>[0]):
 }
 
 async function listen(server: ReturnType<typeof createServer>): Promise<number> {
-  const port = await reserveUnusedPort();
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<number>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
+    server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
-      resolve();
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("Lifecycle fixture did not receive a TCP port"));
+        return;
+      }
+      resolve(address.port);
     });
   });
-  return port;
 }
 
 async function close(server: ReturnType<typeof createServer>): Promise<void> {

@@ -20,6 +20,7 @@ import {
   loadTokenPilotCodexConfig,
   readCodexProviderFromToml,
   readCodexRootModelProvider,
+  readCodexRootStringAssignment,
   writeTokenPilotCodexConfig,
 } from "./config.js";
 import { stopDaemon } from "./daemon.js";
@@ -30,18 +31,13 @@ import {
 import { installLightRsiCliBin } from "../../shared/cli-bin-install.js";
 import { rememberCliHostPathOverrides } from "../../shared/cli-context.js";
 import { installHostCliBin } from "../../shared/host-cli-bin-install.js";
+import { installWindowsNodeCommandLauncher } from "../../shared/windows-command-launcher.js";
 
 function quoteToml(value: string): string {
   return JSON.stringify(value);
 }
 
-const RESERVED_CODEX_PROVIDER_PROXY_NAMES: Record<string, string> = {
-  openai: "tokenpilot-openai",
-};
-
-function reservedCodexProviderProxyName(providerName: string): string | undefined {
-  return RESERVED_CODEX_PROVIDER_PROXY_NAMES[providerName];
-}
+const LEGACY_OPENAI_PROXY_PROVIDER = "tokenpilot-openai";
 
 function builtInCodexProviderConfig(providerName: string): CodexProviderConfig | undefined {
   if (providerName !== "openai") return undefined;
@@ -285,17 +281,20 @@ function hookScriptPath(adapterRoot: string): string {
 async function ensureWindowsHookWrapper(adapterRoot: string): Promise<string> {
   const wrapperPath = hookWrapperPath(adapterRoot);
   await mkdir(dirname(wrapperPath), { recursive: true });
-  await writeFile(wrapperPath, [
-    "@echo off",
-    `${shellQuote(process.execPath)} ${shellQuote(hookScriptPath(adapterRoot))} %*`,
-    "",
-  ].join("\r\n"), "utf8");
-  return wrapperPath;
+  const installed = await installWindowsNodeCommandLauncher({
+    binPath: wrapperPath.slice(0, -".cmd".length),
+    targetPath: hookScriptPath(adapterRoot),
+    platform: "win32",
+  });
+  if (!installed) throw new Error("Failed to create the Windows Codex hook launcher");
+  return installed;
 }
 
 async function tokenPilotHookCommand(adapterRoot: string, platform = process.platform): Promise<string> {
   if (platform === "win32") {
-    return shellQuote(await ensureWindowsHookWrapper(adapterRoot));
+    const wrapperPath = await ensureWindowsHookWrapper(adapterRoot);
+    const powerShellWrapperPath = `${wrapperPath.slice(0, -".cmd".length)}.ps1`;
+    return `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${powerShellWrapperPath}"`;
   }
   return `${shellQuote(process.execPath)} ${shellQuote(hookScriptPath(adapterRoot))}`;
 }
@@ -341,7 +340,9 @@ function isTokenPilotHookGroup(item: Record<string, unknown>): boolean {
     if (!hook || typeof hook !== "object") return false;
     const command = (hook as Record<string, unknown>).command;
     return typeof command === "string"
-      && (command.includes("hooks-handler.js") || command.includes("tokenpilot-codex-hook.cmd"));
+      && (command.includes("hooks-handler.js")
+        || command.includes("tokenpilot-codex-hook.cmd")
+        || command.includes("tokenpilot-codex-hook.ps1"));
   });
 }
 
@@ -447,21 +448,40 @@ export async function installCodexTokenPilot(params?: {
     waitForPreferredMs: stoppedDaemon?.stopped ? 1_000 : 0,
   });
   const existingRootProvider = await readCodexRootModelProvider(codexConfigPath);
+  const legacyBuiltInProvider = existingRootProvider === LEGACY_OPENAI_PROXY_PROVIDER
+    ? "openai"
+    : undefined;
   const persistedProviderName = tokenPilotConfig.providerName !== "tokenpilot"
+    && tokenPilotConfig.providerName !== LEGACY_OPENAI_PROXY_PROVIDER
     ? tokenPilotConfig.providerName
     : undefined;
-  const selectedProviderName = (existingRootProvider
+  const selectedProviderName = (legacyBuiltInProvider
+    || existingRootProvider
     || params?.providerName?.trim()
-    || tokenPilotConfig.upstreamProvider
     || persistedProviderName
-    || "OpenAI");
-  const reservedProviderProxyName = reservedCodexProviderProxyName(selectedProviderName);
-  const providerName = reservedProviderProxyName ?? selectedProviderName;
-  const interceptedProvider = await readCodexProviderFromToml(providerName, codexConfigPath);
+    || (tokenPilotConfig.upstream?.baseUrl ? tokenPilotConfig.upstreamProvider : undefined)
+    || "openai");
+  const builtInOpenAI = selectedProviderName === "openai";
+  const providerName = selectedProviderName;
+  const existingInterceptedProviderName = legacyBuiltInProvider
+    ? LEGACY_OPENAI_PROXY_PROVIDER
+    : providerName;
+  const interceptedProvider = builtInOpenAI
+    ? builtInCodexProviderConfig("openai")
+    : await readCodexProviderFromToml(existingInterceptedProviderName, codexConfigPath);
   const previousProxyBaseUrl = `http://127.0.0.1:${previousProxyPort}/v1`;
-  const existingInterceptedProxyBaseUrl = normalizeLocalProxyBaseUrl(interceptedProvider?.baseUrl);
-  const providerAlreadyRouted = tokenPilotConfig.providerName === providerName
-    && interceptedProvider?.baseUrl === previousProxyBaseUrl
+  const existingRootOpenAIBaseUrl = builtInOpenAI
+    ? await readCodexRootStringAssignment("openai_base_url", codexConfigPath)
+    : undefined;
+  const existingCustomProvider = builtInOpenAI
+    ? await readCodexProviderFromToml(existingInterceptedProviderName, codexConfigPath)
+    : interceptedProvider;
+  const existingInterceptedProxyBaseUrl = normalizeLocalProxyBaseUrl(
+    builtInOpenAI ? existingRootOpenAIBaseUrl ?? existingCustomProvider?.baseUrl : interceptedProvider?.baseUrl,
+  );
+  const providerAlreadyRouted = (tokenPilotConfig.providerName === providerName
+      || (legacyBuiltInProvider && tokenPilotConfig.providerName === LEGACY_OPENAI_PROXY_PROVIDER))
+    && existingInterceptedProxyBaseUrl === previousProxyBaseUrl
     && Boolean(tokenPilotConfig.upstream?.baseUrl);
   const installedProviderLooksFresh = existingInterceptedProxyBaseUrl === previousProxyBaseUrl;
   const upstreamProvider = providerAlreadyRouted || installedProviderLooksFresh
@@ -488,17 +508,20 @@ export async function installCodexTokenPilot(params?: {
     await copyFile(codexConfigPath, `${codexConfigPath}.tokenpilot.bak`);
   }
   let next = existing;
-  if (reservedProviderProxyName) {
-    next = removeProviderSectionFamily(next, selectedProviderName);
-  }
   next = replaceOrInsertRootAssignment(next, "model_provider", quoteToml(providerName));
-  next = rewriteProviderSectionForProxy(next, {
-    providerName,
-    baseUrl,
-    displayName: interceptedProvider?.name ?? providerName,
-    wireApi: interceptedProvider?.wireApi ?? "responses",
-    requiresOpenAIAuth: interceptedProvider?.requiresOpenAIAuth ?? true,
-  });
+  if (builtInOpenAI) {
+    next = removeProviderSectionFamily(next, "openai");
+    next = removeProviderSectionFamily(next, LEGACY_OPENAI_PROXY_PROVIDER);
+    next = replaceOrInsertRootAssignment(next, "openai_base_url", quoteToml(baseUrl));
+  } else {
+    next = rewriteProviderSectionForProxy(next, {
+      providerName,
+      baseUrl,
+      displayName: interceptedProvider?.name ?? providerName,
+      wireApi: interceptedProvider?.wireApi ?? "responses",
+      requiresOpenAIAuth: interceptedProvider?.requiresOpenAIAuth ?? true,
+    });
+  }
   next = upsertMcpServerSection(next, {
     serverName: mcpServer.serverName,
     command: mcpServer.command,

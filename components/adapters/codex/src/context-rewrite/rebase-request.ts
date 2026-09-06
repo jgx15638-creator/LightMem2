@@ -107,6 +107,37 @@ function closureReasons(items: JsonObject[]): string[] {
   return Array.from(new Set(reasons)).sort();
 }
 
+function responsesReplayItemKey(item: JsonObject): string {
+  const comparable = stripServerOwnedResponsesFields(item);
+  // Codex adds this turn-local envelope when it resubmits an already-observed
+  // tool closure. It does not change the tool call/output itself and must not
+  // make the historical copy look like a conflicting duplicate.
+  delete comparable.internal_chat_message_metadata_passthrough;
+  return stableInputKey(comparable);
+}
+
+function currentInputItems(input: unknown): JsonObject[] {
+  return Array.isArray(input)
+    ? input.filter((item): item is JsonObject => Boolean(
+        item
+        && typeof item === "object"
+        && !Array.isArray(item),
+      ))
+    : [];
+}
+
+function retainedReplayItems(params: {
+  effectiveHistory: CodexEffectiveHistory;
+  evictedStableItemIds: Set<string>;
+  currentInput: JsonObject[];
+}): JsonObject[] {
+  const currentInputKeys = new Set(params.currentInput.map(responsesReplayItemKey));
+  return params.effectiveHistory.replayableItems
+    .filter((entry) => !params.evictedStableItemIds.has(entry.stableItemId))
+    .map((entry) => stripServerOwnedResponsesFields(entry.item))
+    .filter((item) => !currentInputKeys.has(responsesReplayItemKey(item)));
+}
+
 export function validateCodexRebaseRequest(params: {
   baseRevision: string;
   effectiveHistory: CodexEffectiveHistory;
@@ -134,12 +165,12 @@ export function validateCodexRebaseRequest(params: {
     if (!knownItemIds.has(stableItemId)) reasons.push(`mutation_target_missing:${stableItemId}`);
   }
 
-  const retainedItems = params.effectiveHistory.replayableItems
-    .filter((entry) => !evicted.has(entry.stableItemId))
-    .map((entry) => entry.item);
-  const currentInput = Array.isArray(params.currentInput)
-    ? params.currentInput.filter((item): item is JsonObject => Boolean(item && typeof item === "object" && !Array.isArray(item)))
-    : [];
+  const currentInput = currentInputItems(params.currentInput);
+  const retainedItems = retainedReplayItems({
+    effectiveHistory: params.effectiveHistory,
+    evictedStableItemIds: evicted,
+    currentInput,
+  });
   reasons.push(...closureReasons([...retainedItems, ...currentInput]));
 
   return {
@@ -265,11 +296,11 @@ export function buildCodexRebaseRequest(params: {
   const currentInput = Array.isArray(params.currentInput)
     ? cloneJson(params.currentInput)
     : [];
-  const currentInputKeys = new Set(currentInput.map(stableInputKey));
-  const retainedHistory = params.effectiveHistory.replayableItems
-    .filter((entry) => !evicted.has(entry.stableItemId))
-    .map((entry) => stripServerOwnedResponsesFields(entry.item))
-    .filter((item) => !currentInputKeys.has(stableInputKey(item)));
+  const retainedHistory = retainedReplayItems({
+    effectiveHistory: params.effectiveHistory,
+    evictedStableItemIds: evicted,
+    currentInput: currentInputItems(currentInput),
+  });
 
   payload.input = [
     ...retainedHistory,

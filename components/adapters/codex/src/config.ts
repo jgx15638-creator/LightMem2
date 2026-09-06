@@ -261,7 +261,7 @@ export async function loadTokenPilotCodexConfig(configPath = defaultTokenPilotCo
   if (!existsSync(configPath)) {
     return normalizeTokenPilotCodexConfig({}, { configPath });
   }
-  const text = await readFile(configPath, "utf8");
+  const text = (await readFile(configPath, "utf8")).replace(/^\uFEFF/u, "");
   return normalizeTokenPilotCodexConfig(JSON.parse(text), { configPath });
 }
 
@@ -332,13 +332,21 @@ export async function readCodexProviderFromToml(
 export async function readCodexRootModelProvider(
   configPath = defaultCodexConfigPath(),
 ): Promise<string | undefined> {
+  return readCodexRootStringAssignment("model_provider", configPath);
+}
+
+export async function readCodexRootStringAssignment(
+  key: string,
+  configPath = defaultCodexConfigPath(),
+): Promise<string | undefined> {
   if (!existsSync(configPath)) return undefined;
   const text = await readFile(configPath, "utf8");
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     if (/^\[.+\]$/.test(trimmed)) break;
-    const assignment = /^model_provider\s*=\s*(.+)$/.exec(trimmed);
+    const assignment = new RegExp(`^${escapedKey}\\s*=\\s*(.+)$`).exec(trimmed);
     if (!assignment) continue;
     return parseTomlStringValue(assignment[1]);
   }

@@ -397,6 +397,91 @@ test("CDH-01 waits for a held journal lock when the wall clock jumps forward", a
   });
 });
 
+test("CDH-01 lock timeout reports the active owner and recovery-lock state", async () => {
+  await withTempState(async (stateDir) => {
+    const sessionId = "codex-session-lock-diagnostic";
+    const heldLock = await acquireCodexContextHistoryJournalLock({ stateDir, sessionId });
+    try {
+      await assert.rejects(
+        acquireCodexContextHistoryJournalLock({
+          stateDir,
+          sessionId,
+          timeoutMs: 25,
+          retryMs: 5,
+        }),
+        (error: Error) => {
+          assert.match(error.message, new RegExp(`session ${sessionId}`));
+          assert.match(error.message, new RegExp(`ownerPid=${process.pid}`));
+          assert.match(error.message, /ownerAlive=true/);
+          assert.match(error.message, /finalRecovery=missing/);
+          return true;
+        },
+      );
+    } finally {
+      await heldLock.release();
+    }
+
+    const lockPath = codexContextHistoryJournalLockPath(stateDir, sessionId);
+    const recoveryPath = `${lockPath}.recovery`;
+    await writeFile(recoveryPath, JSON.stringify({
+      token: "active-recovery-owner",
+      pid: process.pid,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+    }), "utf8");
+    try {
+      await assert.rejects(
+        acquireCodexContextHistoryJournalLock({
+          stateDir,
+          sessionId,
+          timeoutMs: 25,
+          retryMs: 5,
+        }),
+        (error: Error) => {
+          assert.match(error.message, /finalLock=missing/);
+          assert.match(error.message, /finalRecovery=present/);
+          assert.match(error.message, new RegExp(`ownerPid=${process.pid}`));
+          assert.match(error.message, /ownerAlive=true/);
+          return true;
+        },
+      );
+    } finally {
+      await rm(recoveryPath, { force: true });
+    }
+  });
+});
+
+test("CDH-01 recovers after a recovery-lock owner exits unexpectedly", async () => {
+  await withTempState(async (stateDir) => {
+    const sessionId = "codex-session-crashed-recovery-owner";
+    const lockPath = codexContextHistoryJournalLockPath(stateDir, sessionId);
+    const recoveryPath = `${lockPath}.recovery`;
+    await mkdir(dirname(lockPath), { recursive: true });
+    const crashedPid = 2_147_483_647;
+    const owner = {
+      token: "crashed-owner",
+      pid: crashedPid,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+    };
+    await writeFile(lockPath, JSON.stringify(owner), "utf8");
+    await writeFile(recoveryPath, JSON.stringify(owner), "utf8");
+    const recoveryOwner = JSON.parse(await readFile(recoveryPath, "utf8")) as { pid: number };
+    assert.equal(recoveryOwner.pid, crashedPid);
+
+    const recoveredLock = await acquireCodexContextHistoryJournalLock({
+      stateDir,
+      sessionId,
+      timeoutMs: 500,
+      retryMs: 5,
+    });
+    await recoveredLock.release();
+
+    await assert.rejects(stat(lockPath), { code: "ENOENT" });
+    await assert.rejects(stat(recoveryPath), { code: "ENOENT" });
+  });
+});
+
 test("CDH-01 serializes concurrent request and response journal records", async () => {
   await withTempState(async (stateDir) => {
     const sessionId = "codex-session-concurrent-mixed";

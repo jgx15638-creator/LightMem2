@@ -7,23 +7,46 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hasCachedInputTokens, readCachedInputTokens } from "../state/cache-usage.js";
 
+// WHATWG Fetch blocks a small set of historically unsafe ports before opening
+// a connection. An OS-assigned ephemeral port can still land on one of them,
+// which makes otherwise valid loopback tests fail with `TypeError: bad port`.
+const FETCH_FORBIDDEN_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77,
+  79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135,
+  137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531,
+  532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720,
+  1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+  6668, 6669, 6679, 6697, 10080,
+]);
+
+export function isFetchSafeTestPort(port: number): boolean {
+  return Number.isInteger(port)
+    && port >= 1
+    && port <= 65_535
+    && !FETCH_FORBIDDEN_PORTS.has(port);
+}
+
 export async function reserveUnusedPort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("failed to reserve test port")));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(port);
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const port = await new Promise<number>((resolve, reject) => {
+      const server = createServer();
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          server.close(() => reject(new Error("failed to reserve test port")));
+          return;
+        }
+        const { port } = address;
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve(port);
+        });
       });
     });
-  });
+    if (isFetchSafeTestPort(port)) return port;
+  }
+  throw new Error("failed to reserve a Fetch-safe test port");
 }
 
 export async function withTempHome<T>(

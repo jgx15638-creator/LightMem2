@@ -26,12 +26,17 @@ import {
 } from "../../../../adapters/codex/src/host-config-adapter.js";
 import {
   resolveCanonicalCodexSessionId,
+  resolveCodexSessionAlias,
   resolveLatestCodexSessionId,
 } from "../../../../adapters/codex/src/session-state.js";
 import {
   readRecentCodexCacheAuditRecordsForSession,
 } from "../../../../adapters/codex/src/cache-audit.js";
 import { createCodexContextCleanerBridge } from "../../../../adapters/codex/src/context-cleaner/index.js";
+import {
+  renderCodexSessionReport,
+  resolveCodexSessionTopology,
+} from "../../../../adapters/codex/src/session-report.js";
 import {
   applyStandardRuntimeModeConfig,
   buildSessionReportResult,
@@ -84,7 +89,12 @@ export async function createCodexCleanCommandBackend(
       requestTimeoutMs: config.taskStateEstimator.requestTimeoutMs,
     },
     createBridge(controlPlane) {
-      return createCodexContextCleanerBridge({ stateDir, controlPlane });
+      return createCodexContextCleanerBridge({
+        stateDir,
+        controlPlane,
+        currentCodexSessionId: process.env.CODEX_SESSION_ID?.trim()
+          || process.env.CODEX_THREAD_ID?.trim(),
+      });
     },
   });
 }
@@ -99,10 +109,16 @@ async function writeConfig(nextConfig: Record<string, unknown>, pathOverrides?: 
 }
 
 async function maybeResolveLatestSessionId(pathOverrides?: CliHostPathOverrides): Promise<string | undefined> {
+  const currentConfig = await loadConfig(pathOverrides);
+  const stateDir = resolveCodexStateDir(currentConfig);
+  const currentCodexSessionId = process.env.CODEX_SESSION_ID?.trim()
+    || process.env.CODEX_THREAD_ID?.trim();
+  if (stateDir && currentCodexSessionId) {
+    const currentSessionId = await resolveCodexSessionAlias(stateDir, currentCodexSessionId);
+    if (currentSessionId) return currentSessionId;
+  }
   return resolveConfiguredPreferredSessionId({
-    loadConfig() {
-      return loadConfig(pathOverrides);
-    },
+    async loadConfig() { return currentConfig; },
     resolveStateDir: resolveCodexStateDir,
     resolveLatestSessionId: resolveLatestCodexSessionId,
     readLatestUxEffect,
@@ -118,6 +134,12 @@ async function resolveCodexCliSessionId(params: {
   const explicit = typeof params.explicitSessionId === "string" ? params.explicitSessionId.trim() : "";
   if (explicit) {
     return resolveCanonicalCodexSessionId(stateDir, explicit);
+  }
+  const currentCodexSessionId = process.env.CODEX_SESSION_ID?.trim()
+    || process.env.CODEX_THREAD_ID?.trim();
+  if (currentCodexSessionId) {
+    const currentSessionId = await resolveCodexSessionAlias(stateDir, currentCodexSessionId);
+    if (currentSessionId) return currentSessionId;
   }
   return resolvePreferredSessionId({
     stateDir,
@@ -194,6 +216,10 @@ export function createCodexCliBridge(target: {
         currentConfig,
         explicitSessionId: target.sessionId,
       });
+      const stateDir = resolveCodexStateDir(currentConfig);
+      if (stateDir && sessionId && await resolveCodexSessionTopology(stateDir, sessionId)) {
+        return { text: await renderCodexSessionReport(stateDir, sessionId) };
+      }
       return buildSessionReportResult({
         currentConfig,
         explicitSessionId: sessionId,

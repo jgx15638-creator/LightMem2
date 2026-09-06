@@ -245,6 +245,7 @@ export async function renderCodexSessionReport(stateDir: string, sessionRef?: st
     title: "TokenPilot Codex report:",
     sessionId: topology.sessionId,
     detailsEnabled: true,
+    emptyMessage: "- no reduction savings recorded yet",
     overview,
     cacheAuditSummary,
     readers: {

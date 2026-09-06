@@ -187,6 +187,32 @@ function buildMutationPlan(params: {
   };
 }
 
+function relocateMutationPlanForFrozenSelection(params: {
+  record: ContextCleanPlanRecord;
+  current: ContextCleanExecutionSnapshot;
+  selectedTasks: ApprovedContextCleanTask[];
+  mutationPlan: ContextMutationPlan;
+}): ContextMutationPlan | undefined {
+  if (params.current.snapshot.revision === params.record.plan.baseRevision) {
+    return params.mutationPlan;
+  }
+  const baseline = params.record.plan.snapshotItems;
+  if (!baseline || baseline.length === 0) return undefined;
+
+  const baselineById = new Map(
+    baseline.map((item) => [item.stableId, item.fingerprint]),
+  );
+  for (const task of params.selectedTasks) {
+    for (const itemId of task.itemIds) {
+      if (baselineById.get(itemId) !== task.itemDigests[itemId]) return undefined;
+    }
+  }
+  return {
+    ...params.mutationPlan,
+    baseRevision: params.current.snapshot.revision,
+  };
+}
+
 /**
  * Reconstructs the immutable mutation scope from the persisted plan. Hosts use
  * this for recovery only; it never accepts item ids or digests from a caller.
@@ -308,7 +334,7 @@ async function prepareScheduledClean(params: {
   if (!storedExecution) {
     return bypassed(["clean_execution_plan_selection_invalid"], stored.receipt);
   }
-  const { selectedTasks, mutationPlan } = storedExecution;
+  const { selectedTasks, mutationPlan: storedMutationPlan } = storedExecution;
 
   let current: ContextCleanExecutionSnapshot;
   try {
@@ -329,7 +355,13 @@ async function prepareScheduledClean(params: {
     || current.snapshot.sessionId !== request.sessionId) {
     return bypassed(["clean_execution_snapshot_identity_mismatch"], stored.receipt);
   }
-  if (current.snapshot.revision !== request.baseRevision) {
+  const mutationPlan = relocateMutationPlanForFrozenSelection({
+    record: stored.record,
+    current,
+    selectedTasks,
+    mutationPlan: storedMutationPlan,
+  });
+  if (!mutationPlan) {
     return bypassed(["clean_execution_revision_stale"], stored.receipt);
   }
 
@@ -407,7 +439,7 @@ async function prepareScheduledClean(params: {
       cleanPlanId: stored.record.plan.planId,
       hostId: stored.record.plan.hostId,
       sessionId: stored.record.plan.sessionId,
-      baseRevision: stored.record.plan.baseRevision,
+      baseRevision: mutationPlan.baseRevision,
       selectedTasks,
       mutationPlan,
       scheduledReceipt: stored.receipt,

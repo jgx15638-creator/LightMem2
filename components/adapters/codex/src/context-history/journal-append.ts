@@ -38,6 +38,7 @@ export type CodexContextHistoryJournalTailRecoveryResult = {
 };
 
 const DEFAULT_LOCK_STALE_MS = 30 * 60 * 1000;
+const DEFAULT_RECOVERY_LOCK_STALE_MS = 60_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
 const LOCK_REMOVE_MAX_RETRIES = 5;
@@ -126,11 +127,16 @@ async function lockIsStale(params: {
   lockPath: string;
   staleAfterMs: number;
   nowMs: number;
+  expireLiveOwnerAfterMs?: boolean;
 }): Promise<boolean> {
   const owner = await readLockOwner(params.lockPath);
   if (owner) {
-    if (owner.hostname === hostname()) return !isProcessAlive(owner.pid);
-    return params.nowMs - (timestampMs(owner.createdAt) ?? params.nowMs) > params.staleAfterMs;
+    const ageMs = params.nowMs - (timestampMs(owner.createdAt) ?? params.nowMs);
+    if (owner.hostname === hostname()) {
+      return !isProcessAlive(owner.pid)
+        || (params.expireLiveOwnerAfterMs === true && ageMs > params.staleAfterMs);
+    }
+    return ageMs > params.staleAfterMs;
   }
   try {
     const lockStat = await stat(params.lockPath);
@@ -153,26 +159,41 @@ async function tryAcquireJournalLock(params: {
   stateDir: string;
   sessionId: string;
   staleAfterMs: number;
+  recoveryStaleAfterMs: number;
 }): Promise<CodexContextHistoryJournalLock | undefined> {
   const lockPath = codexContextHistoryJournalLockPath(params.stateDir, params.sessionId);
   const recoveryPath = `${lockPath}.recovery`;
   await mkdir(dirname(lockPath), { recursive: true });
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    if (await pathExists(recoveryPath)) return undefined;
+    if (await pathExists(recoveryPath)
+      && !await reclaimStaleLockPath({
+        lockPath: recoveryPath,
+        staleAfterMs: params.recoveryStaleAfterMs,
+      })) return undefined;
     let lockHandle: Awaited<ReturnType<typeof open>>;
     try {
       lockHandle = await open(lockPath, "wx");
     } catch (error) {
       if (isTransientWindowsLockError(error)) return undefined;
       if (errorCode(error) !== "EEXIST") throw error;
-      if (await pathExists(recoveryPath)) return undefined;
+      if (await pathExists(recoveryPath)
+        && !await reclaimStaleLockPath({
+          lockPath: recoveryPath,
+          staleAfterMs: params.recoveryStaleAfterMs,
+        })) return undefined;
       if (!await lockIsStale({
         lockPath,
         staleAfterMs: params.staleAfterMs,
         nowMs: Date.now(),
       })) return undefined;
 
+      const recoveryOwner: CodexContextHistoryJournalLockOwner = {
+        token: randomUUID(),
+        pid: process.pid,
+        hostname: hostname(),
+        createdAt: new Date().toISOString(),
+      };
       let recoveryHandle: Awaited<ReturnType<typeof open>>;
       try {
         recoveryHandle = await open(recoveryPath, "wx");
@@ -182,7 +203,7 @@ async function tryAcquireJournalLock(params: {
         throw recoveryError;
       }
       try {
-        await recoveryHandle.writeFile(randomUUID(), "utf8");
+        await recoveryHandle.writeFile(JSON.stringify(recoveryOwner), "utf8");
         await recoveryHandle.sync();
       } finally {
         await recoveryHandle.close();
@@ -208,7 +229,7 @@ async function tryAcquireJournalLock(params: {
           }
         }
       } finally {
-        await removeLockPath(recoveryPath);
+        await releaseOwnedLockPath(recoveryPath, recoveryOwner);
       }
       continue;
     }
@@ -238,16 +259,7 @@ async function tryAcquireJournalLock(params: {
     return {
       lockPath,
       async release() {
-        try {
-          const current = await readLockOwner(lockPath);
-          if (current?.token === owner.token) {
-            const releasedLockPath = `${lockPath}.released-${owner.token}`;
-            await rename(lockPath, releasedLockPath);
-            await removeLockPath(releasedLockPath);
-          }
-        } catch {
-          // Leaving a stale lock is safer than deleting a lock whose owner may have changed.
-        }
+        await releaseOwnedLockPath(lockPath, owner);
       },
     };
   }
@@ -258,10 +270,15 @@ export async function acquireCodexContextHistoryJournalLock(params: {
   stateDir: string;
   sessionId: string;
   staleAfterMs?: number;
+  recoveryStaleAfterMs?: number;
   timeoutMs?: number;
   retryMs?: number;
 }): Promise<CodexContextHistoryJournalLock> {
   const staleAfterMs = Math.max(1_000, params.staleAfterMs ?? DEFAULT_LOCK_STALE_MS);
+  const recoveryStaleAfterMs = Math.max(
+    1_000,
+    params.recoveryStaleAfterMs ?? DEFAULT_RECOVERY_LOCK_STALE_MS,
+  );
   const timeoutMs = Math.max(0, params.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
   const retryMs = Math.max(1, params.retryMs ?? DEFAULT_LOCK_RETRY_MS);
   const deadline = performance.now() + timeoutMs;
@@ -271,13 +288,40 @@ export async function acquireCodexContextHistoryJournalLock(params: {
       stateDir: params.stateDir,
       sessionId: params.sessionId,
       staleAfterMs,
+      recoveryStaleAfterMs,
     });
     if (lock) return lock;
     if (performance.now() >= deadline) break;
     await wait(Math.min(retryMs, Math.max(1, deadline - performance.now())));
   } while (true);
 
-  throw new Error(`Timed out acquiring Codex context-history journal lock for session ${params.sessionId}`);
+  const lockPath = codexContextHistoryJournalLockPath(params.stateDir, params.sessionId);
+  const [observedLockDiagnostic, observedRecoveryDiagnostic] = await Promise.all([
+    describeLockPath(lockPath),
+    describeLockPath(`${lockPath}.recovery`),
+  ]);
+
+  // A writer can release between the last failed open and timeout diagnostics.
+  // Give that boundary race one bounded grace interval, then make a final atomic
+  // acquisition before reporting a timeout.
+  await wait(Math.min(retryMs, 25));
+  const finalLock = await tryAcquireJournalLock({
+    stateDir: params.stateDir,
+    sessionId: params.sessionId,
+    staleAfterMs,
+    recoveryStaleAfterMs,
+  });
+  if (finalLock) return finalLock;
+
+  const [lockDiagnostic, recoveryDiagnostic] = await Promise.all([
+    describeLockPath(lockPath),
+    describeLockPath(`${lockPath}.recovery`),
+  ]);
+  throw new Error(
+    `Timed out acquiring Codex context-history journal lock for session ${params.sessionId}; `
+    + `observedLock=${observedLockDiagnostic}; observedRecovery=${observedRecoveryDiagnostic}; `
+    + `finalLock=${lockDiagnostic}; finalRecovery=${recoveryDiagnostic}`,
+  );
 }
 
 export async function withCodexContextHistoryJournalLock<T>(params: {
@@ -290,6 +334,79 @@ export async function withCodexContextHistoryJournalLock<T>(params: {
   } finally {
     await lock.release();
   }
+}
+
+async function releaseOwnedLockPath(
+  lockPath: string,
+  owner: CodexContextHistoryJournalLockOwner,
+): Promise<void> {
+  try {
+    const current = await readLockOwner(lockPath);
+    if (current?.token !== owner.token) return;
+    const releasedLockPath = `${lockPath}.released-${owner.token}`;
+    await rename(lockPath, releasedLockPath);
+    await removeLockPath(releasedLockPath);
+  } catch {
+    // Leaving a stale lock is safer than deleting a lock whose owner may have changed.
+  }
+}
+
+async function reclaimStaleLockPath(params: {
+  lockPath: string;
+  staleAfterMs: number;
+}): Promise<boolean> {
+  if (!await lockIsStale({
+    lockPath: params.lockPath,
+    staleAfterMs: params.staleAfterMs,
+    nowMs: Date.now(),
+    expireLiveOwnerAfterMs: true,
+  })) return false;
+
+  const claimedPath = `${params.lockPath}.stale-${randomUUID()}`;
+  try {
+    await rename(params.lockPath, claimedPath);
+  } catch (error) {
+    if (isTransientWindowsLockError(error)
+      || errorCode(error) === "ENOENT"
+      || errorCode(error) === "EEXIST") return false;
+    throw error;
+  }
+
+  if (!await lockIsStale({
+    lockPath: claimedPath,
+    staleAfterMs: params.staleAfterMs,
+    nowMs: Date.now(),
+    expireLiveOwnerAfterMs: true,
+  })) {
+    try {
+      await rename(claimedPath, params.lockPath);
+    } catch {
+      // Its live owner can finish safely; keep the claimed path rather than deleting it.
+    }
+    return false;
+  }
+  await removeLockPath(claimedPath);
+  return true;
+}
+
+async function describeLockPath(lockPath: string): Promise<string> {
+  let lockStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    lockStat = await stat(lockPath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return `missing(path=${JSON.stringify(lockPath)})`;
+    return `unreadable(path=${JSON.stringify(lockPath)},code=${errorCode(error) ?? "unknown"})`;
+  }
+
+  const owner = await readLockOwner(lockPath);
+  if (!owner) {
+    const ageMs = Math.max(0, Math.round(Date.now() - lockStat.mtimeMs));
+    return `present(path=${JSON.stringify(lockPath)},owner=invalid,ageMs=${ageMs})`;
+  }
+  const createdAtMs = timestampMs(owner.createdAt) ?? lockStat.mtimeMs;
+  const ageMs = Math.max(0, Math.round(Date.now() - createdAtMs));
+  const ownerAlive = owner.hostname === hostname() ? String(isProcessAlive(owner.pid)) : "unknown";
+  return `present(path=${JSON.stringify(lockPath)},ownerPid=${owner.pid},ownerHost=${JSON.stringify(owner.hostname)},ownerAlive=${ownerAlive},ageMs=${ageMs})`;
 }
 
 function sha256Bytes(value: Uint8Array): string {

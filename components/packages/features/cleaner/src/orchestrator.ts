@@ -115,6 +115,10 @@ export async function analyzeContextCleanSession(
     hostId: params.bridge.hostId,
     sessionId,
     baseRevision: snapshot.revision,
+    snapshotItems: snapshot.items.map((item) => ({
+      stableId: item.stableId,
+      fingerprint: item.fingerprint,
+    })),
     ...(snapshot.model ? { model: snapshot.model } : {}),
     ...(params.contextWindowTokens !== undefined
       ? { contextWindowTokens: params.contextWindowTokens }

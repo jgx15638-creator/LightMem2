@@ -94,6 +94,9 @@ The installed Codex skill bridge currently creates these explicit skills:
 - `lightrsi-doctor`
 - `lightrsi-visual`
 - `lightrsi-clean` (explicit, analysis-only; it never selects or confirms a clean)
+- `lightrsi-clean-status` (read one exact plan receipt)
+- `lightrsi-clean-apply` (schedule only user-supplied task IDs)
+- `lightrsi-clean-cancel` (cancel one exact plan)
 
 These are host entry points, not a separate runtime implementation. They call the existing `lightrsi codex ...` CLI surface underneath.
 

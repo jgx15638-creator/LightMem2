@@ -1,18 +1,55 @@
 import { type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-export async function readHttpRequestBody(req: IncomingMessage, signal?: AbortSignal): Promise<string> {
+export class HttpRequestBodyLimitError extends Error {
+  readonly statusCode = 413;
+  readonly code = "request_body_too_large";
+
+  constructor(readonly maxBytes: number) {
+    super(`HTTP request body exceeds the ${maxBytes} byte limit.`);
+    this.name = "HttpRequestBodyLimitError";
+  }
+}
+
+export type HttpRequestBodyReadOptions = {
+  signal?: AbortSignal;
+  maxBytes?: number;
+};
+
+function normalizeReadOptions(
+  options?: AbortSignal | HttpRequestBodyReadOptions,
+): HttpRequestBodyReadOptions {
+  return options && "aborted" in options ? { signal: options } : options ?? {};
+}
+
+export async function readHttpRequestBodyBuffer(
+  req: IncomingMessage,
+  options?: AbortSignal | HttpRequestBodyReadOptions,
+): Promise<Buffer> {
+  const { signal, maxBytes } = normalizeReadOptions(options);
   if (signal?.aborted) {
     throw new DOMException("The operation was aborted", "AbortError");
   }
+  const contentLength = Number(req.headers["content-length"]);
+  if (maxBytes !== undefined
+    && Number.isFinite(contentLength)
+    && contentLength > maxBytes) {
+    throw new HttpRequestBodyLimitError(maxBytes);
+  }
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   const read = (async () => {
     for await (const chunk of req) {
       if (signal?.aborted) {
         throw new DOMException("The operation was aborted", "AbortError");
       }
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      totalBytes += buffer.byteLength;
+      if (maxBytes !== undefined && totalBytes > maxBytes) {
+        throw new HttpRequestBodyLimitError(maxBytes);
+      }
+      chunks.push(buffer);
     }
-    return Buffer.concat(chunks).toString("utf8");
+    return Buffer.concat(chunks);
   })();
   if (!signal) return read;
   let onAbort: (() => void) | undefined;
@@ -25,6 +62,13 @@ export async function readHttpRequestBody(req: IncomingMessage, signal?: AbortSi
   } finally {
     if (onAbort) signal.removeEventListener("abort", onAbort);
   }
+}
+
+export async function readHttpRequestBody(
+  req: IncomingMessage,
+  options?: AbortSignal | HttpRequestBodyReadOptions,
+): Promise<string> {
+  return (await readHttpRequestBodyBuffer(req, options)).toString("utf8");
 }
 
 export function sendJsonResponse(res: ServerResponse, statusCode: number, payload: unknown): void {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
 } from "../src/clean.js";
 import type { CleanPlanView, CleanReceiptView } from "../src/clean-renderer.js";
 import { dispatchCli } from "../src/dispatch.js";
+import { indexCodexHostSessionAlias } from "../../../adapters/codex/src/session-state.js";
 
 function plan(): CleanPlanView {
   return {
@@ -109,6 +110,44 @@ test("dispatch registers clean without coupling the controller to a Host adapter
     else process.env.HOME = originalHome;
     if (originalUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalUserProfile;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Codex clean prefers the current Codex session alias over another latest session", async () => {
+  const home = await mkdtemp(join(tmpdir(), "lightrsi-cli-clean-current-session-"));
+  const originalHome = process.env.HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const originalConfigPath = process.env.TOKENPILOT_CODEX_CONFIG;
+  const originalCodexSessionId = process.env.CODEX_SESSION_ID;
+  const originalCodexThreadId = process.env.CODEX_THREAD_ID;
+  const configPath = join(home, "tokenpilot.json");
+  const stateDir = join(home, "state");
+  const calls: string[] = [];
+  try {
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    process.env.TOKENPILOT_CODEX_CONFIG = configPath;
+    process.env.CODEX_SESSION_ID = "codex-host-current";
+    delete process.env.CODEX_THREAD_ID;
+    await writeFile(configPath, JSON.stringify({ stateDir }), "utf8");
+    await indexCodexHostSessionAlias(stateDir, "codex-host-current", "codex-synth-current");
+    registerCleanCommandBackendResolver(() => backend(calls));
+
+    await dispatchCli(["codex", "clean"]);
+    assert.deepEqual(calls, ["analyze:codex-synth-current"]);
+  } finally {
+    registerCleanCommandBackendResolver(undefined);
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
+    if (originalConfigPath === undefined) delete process.env.TOKENPILOT_CODEX_CONFIG;
+    else process.env.TOKENPILOT_CODEX_CONFIG = originalConfigPath;
+    if (originalCodexSessionId === undefined) delete process.env.CODEX_SESSION_ID;
+    else process.env.CODEX_SESSION_ID = originalCodexSessionId;
+    if (originalCodexThreadId === undefined) delete process.env.CODEX_THREAD_ID;
+    else process.env.CODEX_THREAD_ID = originalCodexThreadId;
     await rm(home, { recursive: true, force: true });
   }
 });

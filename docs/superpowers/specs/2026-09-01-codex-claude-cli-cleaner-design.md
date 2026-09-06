@@ -20,13 +20,13 @@ lightrsi <host> clean --cancel <plan-id>
 
 ## Non-negotiable rules
 
-- A model never selects item IDs, constructs a deletion/rewrite command, or confirms a clean operation.
+- A model never chooses item IDs, task IDs, or deletion ranges. An explicit apply-skill invocation may relay only the complete plan ID and complete task IDs supplied by the user in that same request.
 - User approval freezes the existing `taskId`, `itemIds`, and `itemDigests`; names, text search, message indexes, and newly chosen items never expand selection.
 - System/developer, current/active/unresolved content, ambiguous attribution, and malformed or incomplete tool protocol items remain protected.
-- A stale revision, fingerprint, lifecycle, or tool-closure result produces stale/deferred; it never silently relocates selection.
+- A changed fingerprint, lifecycle, tool closure, or unproven revision produces stale/deferred. A revision may advance only when the persisted ordered ID/digest baseline proves every prior item remains unchanged; relocation never expands the frozen selection.
 - Token totals come only from snapshot metering. A model supplies recommendation labels and reasons only. `chars_only` never invents tokens.
 - `estimated`, `scheduled`, and `applied` remain distinct. Applied savings need real Host rewrite evidence and actual removed counts.
-- Persisted Cleaner records contain only IDs, digests, counts, reasons, and bounded sanitized summaries. No native request payload, transcript text, or adapter metadata is persisted.
+- Persisted Cleaner records contain only IDs, ordered item digests, counts, reasons, and bounded sanitized summaries. No native request payload, transcript text, or adapter metadata is persisted.
 - Cleaning is manual and archive-first. There is no background or default-all clean.
 
 ## Architecture
@@ -88,9 +88,18 @@ lightrsi <host> clean --plan <plan-id> --select <task-id,...>
 
 `--plan --select` is explicit user approval, not a default. `--status` renders estimated, scheduled, applied, and fallback values separately. `--cancel` leaves terminal plans unchanged and returns their terminal receipt.
 
-## Command skill
+## Command skills
 
-Codex and Claude Code installers add `lightrsi-clean` and remove only known legacy cleaner bridge names. The generated skill may run `lightrsi <host> clean` when explicitly invoked, which is a non-interactive analysis-only flow. It may not add `--plan`, `--select`, or `--cancel`, confirm a plan, or parse output to invoke a follow-up command. Codex keeps `allow_implicit_invocation: false`; Claude keeps `disable-model-invocation: true`.
+Codex and Claude Code installers add four explicit-only Cleaner skills:
+
+- `lightrsi-clean` runs non-interactive analysis and never follows up automatically.
+- `lightrsi-clean-status` reads exactly one user-supplied plan receipt.
+- `lightrsi-clean-apply` treats explicit invocation with one complete plan ID and complete task IDs as approval to schedule only those IDs.
+- `lightrsi-clean-cancel` treats explicit invocation with one complete plan ID as approval to cancel only that plan.
+
+The control skills reject missing, ambiguous, or malformed identifiers instead of deriving them from another task. They never construct item IDs or lower-level rewrite commands, and apply never sends the subsequent Host request that activates a scheduled rewrite. Codex keeps `allow_implicit_invocation: false`; Claude keeps `disable-model-invocation: true`.
+
+Because invoking a skill adds control turns after analysis, execution may relocate the frozen mutation plan onto a later revision only when the plan's metadata-only snapshot baseline is an unchanged ordered subsequence of the current snapshot. Missing, reordered, or changed baseline items retain the original stale behavior.
 
 ## Installation boundary
 
@@ -100,8 +109,8 @@ build the shared CLI, recovery MCP, and selected adapter, then delegate all Host
 configuration changes to the existing adapter installer. They do not implement
 Cleaner analysis, selection, scheduling, or rewrite logic.
 
-The adapter installer installs both the canonical CLI launcher and the
-analysis-only `lightrsi-clean` command skill. On Windows it also writes `.cmd`
+The adapter installer installs both the canonical CLI launcher and the four
+explicit-only Cleaner command skills. On Windows it also writes `.cmd`
 launchers; on Unix-like systems it retains executable links. A missing or stale
 build is rejected before Host installation when `--skip-build` is used.
 
@@ -123,4 +132,5 @@ build is rejected before Host installation when `--skip-build` is used.
 4. TTY begins with every selectable task unchecked and refuses to schedule when confirmation is declined.
 5. Non-TTY prints the full plan, numbered selectable task IDs, protected rows, and an explicit follow-up command without scheduling.
 6. `--status` renders estimated, scheduled, applied, and fallback values separately; applied values require Host evidence.
-7. Generated command skills invoke only analysis and cannot autonomously select, confirm, cancel, or follow up.
+7. Generated analysis never follows up; status is read-only; apply and cancel accept only complete identifiers explicitly supplied in the current invocation and cannot choose targets or trigger a later Host request autonomously.
+8. Control turns appended after analysis can advance the revision without expanding selection; any changed, missing, or reordered baseline item remains stale.

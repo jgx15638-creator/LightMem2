@@ -102,6 +102,9 @@ test("installClaudeCodeTokenPilot writes settings, MCP config, and backups exist
       "lightrsi-doctor",
       "lightrsi-visual",
       "lightrsi-clean",
+      "lightrsi-clean-status",
+      "lightrsi-clean-apply",
+      "lightrsi-clean-cancel",
     ]);
     assert.equal(result.cliBinInstalled, true);
     assert.equal(result.cliBinPath, join(cliBinDir, "lightrsi"));

@@ -39,13 +39,15 @@ function normalizeHeaderValue(value: string | string[] | undefined): string | un
   return undefined;
 }
 
-function shouldSkipForwardHeader(name: string): boolean {
+function shouldSkipForwardHeader(name: string, preserveContentEncoding = false): boolean {
   const lower = name.toLowerCase();
   if (lower.startsWith("x-lightrsi-")
     || lower.startsWith("x-tokenpilot-")) {
     return true;
   }
   switch (name.toLowerCase()) {
+    case "content-encoding":
+      return !preserveContentEncoding;
     case "host":
     case "connection":
     case "keep-alive":
@@ -55,7 +57,6 @@ function shouldSkipForwardHeader(name: string): boolean {
     case "trailer":
     case "upgrade":
     case "content-length":
-    case "content-encoding":
     case "transfer-encoding":
     case "accept-language":
     case "sec-fetch-mode":
@@ -95,10 +96,11 @@ export function buildGatewayForwardHeaders(params: {
   inboundAuthorization?: string;
   inboundHeaders?: Record<string, string | string[] | undefined>;
   includeJsonContentType?: boolean;
+  preserveContentEncoding?: boolean;
 }): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const [key, rawValue] of Object.entries(params.inboundHeaders ?? {})) {
-    if (shouldSkipForwardHeader(key)) continue;
+    if (shouldSkipForwardHeader(key, params.preserveContentEncoding)) continue;
     const value = normalizeHeaderValue(rawValue);
     if (typeof value === "string" && value) {
       headers[key] = value;
@@ -161,6 +163,7 @@ export async function forwardGatewayRawRequest(
     inboundAuthorization: params.inboundAuthorization,
     inboundHeaders: params.inboundHeaders,
     includeJsonContentType: params.includeJsonContentType ?? body !== undefined,
+    preserveContentEncoding: params.preserveContentEncoding,
   });
   return fetch(resolveGatewayRequestUrl(params.upstream, params.requestPath), {
     method: params.method ?? "POST",

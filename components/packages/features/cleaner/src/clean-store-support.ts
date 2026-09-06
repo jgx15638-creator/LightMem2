@@ -162,12 +162,27 @@ export function parseContextCleanPlan(value: unknown): ContextCleanPlan | undefi
     || !Array.isArray(value.tasks) || !isIsoTimestamp(value.createdAt)) return undefined;
   if (value.model !== undefined && !isNonBlankString(value.model)) return undefined;
   if (value.contextWindowTokens !== undefined && !finiteNonNegative(value.contextWindowTokens)) return undefined;
+  let snapshotItems: ContextCleanPlan["snapshotItems"];
+  if (value.snapshotItems !== undefined) {
+    if (!Array.isArray(value.snapshotItems)) return undefined;
+    snapshotItems = [];
+    const stableIds = new Set<string>();
+    for (const item of value.snapshotItems) {
+      if (!isRecord(item)
+        || !isNonBlankString(item.stableId)
+        || !isNonBlankString(item.fingerprint)
+        || stableIds.has(item.stableId)) return undefined;
+      stableIds.add(item.stableId);
+      snapshotItems.push({ stableId: item.stableId, fingerprint: item.fingerprint });
+    }
+  }
   const tasks = value.tasks.map(parseTask);
   if (tasks.some((task) => task === undefined)) return undefined;
   if (new Set(tasks.map((task) => task!.taskId)).size !== tasks.length) return undefined;
   return {
     schemaVersion: CONTEXT_CLEAN_SCHEMA_VERSION, planId: value.planId, hostId: value.hostId,
     sessionId: value.sessionId, baseRevision: value.baseRevision,
+    ...(snapshotItems !== undefined ? { snapshotItems } : {}),
     ...(value.model !== undefined ? { model: value.model } : {}),
     ...(value.contextWindowTokens !== undefined ? { contextWindowTokens: value.contextWindowTokens } : {}),
     usedTokens: value.usedTokens, usedChars: value.usedChars,

@@ -16,7 +16,10 @@ test("built-in OpenAI requests use the ChatGPT Codex endpoint for ChatGPT-authen
   assert.deepEqual(resolveCodexRequestUpstream({
     upstream,
     upstreamProvider: "openai",
-    inboundHeaders: { "ChatGPT-Account-Id": "account-fixture" },
+    inboundHeaders: {
+      authorization: "Bearer oauth-fixture",
+      "ChatGPT-Account-Id": "account-fixture",
+    },
   }), {
     ...upstream,
     baseUrl: CODEX_CHATGPT_UPSTREAM_BASE_URL,
@@ -209,7 +212,7 @@ test("unsupported prompt_cache_options is persisted and retried once without tha
     requests.push(payload);
     if ("prompt_cache_options" in payload) {
       res.statusCode = 400;
-      res.end(JSON.stringify({ error: { message: "Unsupported parameter: prompt_cache_options" } }));
+      res.end(JSON.stringify({ detail: "Unsupported parameter: prompt_cache_options" }));
       return;
     }
     res.statusCode = 200;
@@ -239,6 +242,83 @@ test("unsupported prompt_cache_options is persisted and retried once without tha
     assert.equal(requests.length, 2);
     assert.deepEqual(requests[0]?.prompt_cache_options, { mode: "explicit", ttl: "30m" });
     assert.equal("prompt_cache_options" in (requests[1] ?? {}), false);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("unsupported content-block prompt_cache_breakpoint downgrades explicit caching only for that model", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cache-breakpoint-capability-"));
+  const requests: Array<Record<string, unknown>> = [];
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    const payload = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    requests.push(payload);
+    const content = ((payload.input as Array<Record<string, unknown>> | undefined)?.[0]?.content ?? []) as Array<Record<string, unknown>>;
+    if (content.some((part) => "prompt_cache_breakpoint" in part)) {
+      res.statusCode = 400;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        error: {
+          type: "invalid_request_error",
+          param: "prompt_cache_breakpoint",
+          message: "prompt_cache_breakpoint is not supported on this model",
+        },
+      }));
+      return;
+    }
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ status: "completed", output: [] }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("fixture did not bind a port");
+  const upstream = {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    wireApi: "responses" as const,
+    requiresOpenAIAuth: false,
+  };
+  const payload = {
+    model: "gpt-5.6-fixture-a",
+    prompt_cache_options: { mode: "explicit" },
+    input: [{
+      role: "developer",
+      content: [{
+        type: "input_text",
+        text: "stable",
+        prompt_cache_breakpoint: { mode: "explicit" },
+      }],
+    }],
+    tools: [{
+      type: "function",
+      name: "fixture",
+      parameters: {
+        type: "object",
+        properties: { prompt_cache_breakpoint: { type: "string" } },
+      },
+    }],
+  };
+  try {
+    const first = await requestUpstreamResponses({ upstream, payload, stateDir });
+    assert.equal(first.status, 200);
+    assert.equal(requests.length, 2);
+    assert.equal("prompt_cache_options" in (requests[1] ?? {}), false);
+    const retryContent = (((requests[1]?.input as Array<Record<string, unknown>>)[0]?.content) ?? []) as Array<Record<string, unknown>>;
+    assert.equal("prompt_cache_breakpoint" in (retryContent[0] ?? {}), false);
+    const retryTools = requests[1]?.tools as Array<Record<string, unknown>>;
+    assert.equal(JSON.stringify(retryTools).includes("prompt_cache_breakpoint"), true);
+    assert.equal("prompt_cache_options" in payload, true);
+    assert.equal("prompt_cache_breakpoint" in payload.input[0]!.content[0]!, true);
+
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(stateDir, { recursive: true, force: true });

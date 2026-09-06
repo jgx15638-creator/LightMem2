@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -38,9 +38,12 @@ test("CLI bin installer writes Windows command launchers for the shared and host
     assert.equal(shared.launcherPath, join(binDir, "lightrsi.cmd"));
     assert.equal(shared.legacyLauncherPath, join(binDir, "lightmem2.cmd"));
     assert.equal(host.launcherPath, join(binDir, "tokenpilot-codex.cmd"));
-    assert.match(await readFile(shared.launcherPath!, "utf8"), /"C:\\Program Files\\nodejs\\node\.exe" .*lightrsi\.js" %\*/);
-    assert.match(await readFile(shared.legacyLauncherPath!, "utf8"), /lightrsi\.js" %\*/);
-    assert.match(await readFile(host.launcherPath!, "utf8"), /cli\.js" %\*/);
+    assert.match(await readFile(shared.launcherPath!, "ascii"), /powershell\.exe .*"%~dpn0\.ps1" %\*/i);
+    assert.match(await readFile(shared.legacyLauncherPath!, "ascii"), /powershell\.exe .*"%~dpn0\.ps1" %\*/i);
+    assert.match(await readFile(host.launcherPath!, "ascii"), /powershell\.exe .*"%~dpn0\.ps1" %\*/i);
+    assert.match(await readFile(join(binDir, "lightrsi.ps1"), "utf8"), /'C:\\Program Files\\nodejs\\node\.exe'.*lightrsi\.js/);
+    assert.match(await readFile(join(binDir, "lightmem2.ps1"), "utf8"), /lightrsi\.js/);
+    assert.match(await readFile(join(binDir, "tokenpilot-codex.ps1"), "utf8"), /cli\.js/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -76,15 +79,30 @@ test("Windows command launchers execute shared and Host CLIs with forwarded argu
     const adapterRoot = join(dir, "adapter with spaces");
     const distDir = join(adapterRoot, "dist");
     const binDir = join(dir, "bin with spaces");
+    const unicodeNodeDir = join(dir, "电脑软件类");
+    const unicodeNodePath = join(unicodeNodeDir, "node.exe");
     const sharedLog = join(dir, "shared.json");
     const hostLog = join(dir, "host.json");
     await mkdir(distDir, { recursive: true });
+    await mkdir(unicodeNodeDir, { recursive: true });
+    await copyFile(process.execPath, unicodeNodePath);
     const fakeCli = 'require("node:fs").writeFileSync(process.env.LIGHTRSI_LAUNCHER_LOG, JSON.stringify(process.argv.slice(2)));\n';
     await writeFile(join(distDir, "lightrsi.js"), fakeCli, "utf8");
     await writeFile(join(distDir, "cli.js"), fakeCli, "utf8");
 
-    const shared = await installLightRsiCliBin({ adapterRoot, binDir, platform: "win32" });
-    const host = await installHostCliBin({ adapterRoot, host: "codex", binDir, platform: "win32" });
+    const shared = await installLightRsiCliBin({
+      adapterRoot,
+      binDir,
+      platform: "win32",
+      nodePath: unicodeNodePath,
+    });
+    const host = await installHostCliBin({
+      adapterRoot,
+      host: "codex",
+      binDir,
+      platform: "win32",
+      nodePath: unicodeNodePath,
+    });
     const powershell = join(
       process.env.SystemRoot ?? "C:\\Windows",
       "System32",

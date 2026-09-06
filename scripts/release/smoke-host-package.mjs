@@ -34,6 +34,10 @@ async function assertInstalledBin(binPath, targetPath) {
   assert.deepEqual(await readFile(binPath), await readFile(targetPath));
 }
 
+function quotePowerShellLiteral(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
 try {
   await execFileAsync(tarCommand, ["-xzf", archivePath, "-C", extractDir]);
   const packageDir = join(extractDir, "package");
@@ -84,7 +88,7 @@ try {
   const installedConfig = `${hostConfig}\n${auxiliaryConfig}`.replace(/\\+/g, "/");
   const normalizedDistDir = distDir.replace(/\\+/g, "/");
   const hookEntry = process.platform === "win32" && host === "codex"
-    ? "tokenpilot-codex-hook.cmd"
+    ? "tokenpilot-codex-hook.ps1"
     : "hooks-handler.js";
   assert.match(installedConfig, new RegExp(`${normalizedDistDir}/${hookEntry}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(installedConfig, new RegExp(`${normalizedDistDir}/mcp-server.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -93,8 +97,31 @@ try {
   await assertInstalledBin(join(binDir, "lightmem2"), join(distDir, "lightrsi.js"));
   await assertInstalledBin(join(binDir, hostCliName), join(distDir, "cli.js"));
   if (process.platform === "win32") {
-    assert.match(await readFile(join(binDir, "lightrsi.cmd"), "utf8"), /lightrsi\.js" %\*/);
-    assert.match(await readFile(join(binDir, `${hostCliName}.cmd`), "utf8"), /cli\.js" %\*/);
+    for (const commandName of ["lightrsi", "lightmem2", hostCliName]) {
+      const cmd = await readFile(join(binDir, `${commandName}.cmd`), "ascii");
+      assert.match(cmd, /powershell\.exe .*"%~dpn0\.ps1" %\*/i);
+      const powerShell = await readFile(join(binDir, `${commandName}.ps1`));
+      assert.deepEqual([...powerShell.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+    }
+    const sharedPowerShell = await readFile(join(binDir, "lightrsi.ps1"), "utf8");
+    const hostPowerShell = await readFile(join(binDir, `${hostCliName}.ps1`), "utf8");
+    assert.match(sharedPowerShell.replace(/\\+/g, "/"), new RegExp(`${normalizedDistDir}/lightrsi.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(hostPowerShell.replace(/\\+/g, "/"), new RegExp(`${normalizedDistDir}/cli.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    const windowsPowerShell = join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    const result = await execFileAsync(windowsPowerShell, [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `& ${quotePowerShellLiteral(join(binDir, "lightrsi.cmd"))} ${host} clean --help`,
+    ], { env, timeout: 45_000 });
+    assert.match(result.stdout, /lightrsi <host> clean/);
   }
 
   const skillsRoot = host === "codex" ? join(homeDir, ".codex", "skills") : join(homeDir, ".claude", "skills");
@@ -102,9 +129,22 @@ try {
   assert.match(skill, new RegExp(`${normalizedDistDir}/lightrsi.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   const cleanerSkill = (await readFile(join(skillsRoot, "lightrsi-clean", "SKILL.md"), "utf8")).replace(/\\+/g, "/");
   assert.match(cleanerSkill, new RegExp(`^   lightrsi ${host} clean$`, "m"));
+  assert.ok(
+    cleanerSkill.indexOf(normalizedDistDir) < cleanerSkill.indexOf(`   lightrsi ${host} clean`),
+    "installed skill must prefer the version-pinned bundled CLI",
+  );
   assert.doesNotMatch(cleanerSkill, new RegExp(`^   lightrsi ${host} clean\\s+--`, "m"));
   assert.match(cleanerSkill, /Never choose task IDs, item IDs, item digests, or deletion ranges/);
   assert.match(cleanerSkill, /Never answer the confirmation prompt or run a follow-up command/);
+  const cleanerStatusSkill = (await readFile(join(skillsRoot, "lightrsi-clean-status", "SKILL.md"), "utf8")).replace(/\\+/g, "/");
+  assert.match(cleanerStatusSkill, new RegExp(`^   lightrsi ${host} clean --status <plan-id>$`, "m"));
+  assert.match(cleanerStatusSkill, new RegExp(`${normalizedDistDir}/lightrsi.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const cleanerApplySkill = await readFile(join(skillsRoot, "lightrsi-clean-apply", "SKILL.md"), "utf8");
+  assert.match(cleanerApplySkill, new RegExp(`^   lightrsi ${host} clean --plan <plan-id> --select <task-id\\[,task-id\\.\\.\\.\\]>$`, "m"));
+  assert.match(cleanerApplySkill, /Explicit invocation with both the plan ID and task IDs is approval/);
+  const cleanerCancelSkill = await readFile(join(skillsRoot, "lightrsi-clean-cancel", "SKILL.md"), "utf8");
+  assert.match(cleanerCancelSkill, new RegExp(`^   lightrsi ${host} clean --cancel <plan-id>$`, "m"));
+  assert.match(cleanerCancelSkill, /approval to cancel only that exact plan/);
 
   const loaded = await import(pathToFileURL(join(distDir, "index.js")).href);
   assert.ok(Object.keys(loaded).length > 0);
