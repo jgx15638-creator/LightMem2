@@ -137,3 +137,25 @@ test("task-state estimator leaves null provider cost unknown", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("task-state estimator accepts a Host-managed JSON model client without provider secrets", async () => {
+  let systemPrompt = "";
+  let userPayload = "";
+  const estimator = createApiTaskStateEstimator(
+    { lifecycleMode: "coupled", evidenceMode: "three_state" },
+    () => ({
+      async request(input) {
+        systemPrompt = input.systemPrompt;
+        userPayload = input.userPayload;
+        return {
+          text: JSON.stringify({ baseVersion: 1, taskUpdates: [] }),
+        };
+      },
+    }),
+  );
+
+  const output = await estimator.estimate(estimatorInput);
+  assert.deepEqual(output, { baseVersion: 1, taskUpdates: [], usage: undefined });
+  assert.match(systemPrompt, /task-state estimator/);
+  assert.equal(JSON.parse(userPayload).registry.version, 1);
+});

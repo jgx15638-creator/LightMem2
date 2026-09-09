@@ -29,7 +29,9 @@ cd /path/to/LightRSI/components/adapters/openclaw
 npm run install:release
 ```
 
-This installs the packaged TokenPilot runtime component into:
+This uses OpenClaw's managed plugin installer so the declared Context Engine
+capability is recorded and consented, then installs the packaged TokenPilot
+runtime component into:
 
 ```text
 ~/.openclaw/extensions/tokenpilot
@@ -71,7 +73,14 @@ plugin's native command surface:
 
 The first form resolves the current conversation's mapped TokenPilot session.
 If no mapping is available, pass the session id explicitly. Analysis never
-applies a rewrite by itself.
+applies a rewrite by itself. When the task registry is missing or behind the
+canonical conversation, this explicit analysis request first classifies the
+pending turns through OpenClaw's Host-managed, tool-free model completion
+surface. Cleaner recommendations reuse that same Host-managed completion, so
+provider credentials remain inside OpenClaw's auth store. Older Hosts
+without that surface fall back to an explicitly configured `taskStateEstimator`;
+classification or recommendation failure uses the conservative shared fallback
+and does not make any additional task selectable.
 
 Apply only tasks selected from that immutable plan:
 

@@ -1,13 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { ContextCleanPlan, ContextCleanReceipt } from "@lightrsi/cleaner";
+import {
+  analyzeContextCleanRecommendations,
+  type ContextCleanPlan,
+  type ContextCleanReceipt,
+} from "@lightrsi/cleaner";
+import type { JsonModelClient } from "@lightrsi/runtime-core";
 
 import {
+  createOpenClawCleanRecommendationProvider,
   createOpenClawContextCleanerCommandHandler,
   handleOpenClawContextCleanCommand,
+  loadOpenClawContextCleanerConfig,
 } from "./context-cleaner-command.js";
 import { registerTokenPilotCommand } from "../tokenpilot-command.js";
+import { normalizeConfig } from "../../context-stack/integration/config-normalize.js";
 
 const plan: ContextCleanPlan = {
   schemaVersion: 1,
@@ -196,6 +204,71 @@ test("native command registration preserves aliases and exposes clean help", asy
   assert.match(cleanHelp.text, /\/lightrsi clean --plan/);
   const generalHelp = await command.handler({ args: "help" });
   assert.match(generalHelp.text, /Context Cleaner:/);
+});
+
+test("native clean reads current OpenClaw config without the removed runtime loader", async () => {
+  const currentConfig = { plugins: { entries: { tokenpilot: { enabled: true } } } };
+  assert.equal(loadOpenClawContextCleanerConfig({ config: currentConfig }), currentConfig);
+});
+
+test("native clean retains the legacy OpenClaw config loader fallback", async () => {
+  const legacyConfig = { plugins: { entries: {} } };
+  const legacyConfigApi = {
+    marker: "legacy",
+    loadConfig(this: { marker: string }) {
+      assert.equal(this.marker, "legacy");
+      return legacyConfig;
+    },
+  };
+
+  assert.equal(
+    await loadOpenClawContextCleanerConfig({ runtime: { config: legacyConfigApi } }),
+    legacyConfig,
+  );
+});
+
+test("native clean fails closed when OpenClaw exposes no config surface", () => {
+  assert.throws(
+    () => loadOpenClawContextCleanerConfig({}),
+    /clean_config_unavailable/,
+  );
+});
+
+test("native clean recommendations use the Host-managed model without API credentials", async () => {
+  let requests = 0;
+  const modelClient: JsonModelClient = {
+    async request() {
+      requests += 1;
+      return {
+        text: JSON.stringify({
+          tasks: [{
+            taskId: "task-done",
+            label: "Completed task",
+            description: "Finished implementation work",
+            summary: "done",
+            recommendation: "clean",
+            reasonCodes: ["task_completed"],
+            confidence: 0.95,
+          }],
+        }),
+      };
+    },
+  };
+  const provider = createOpenClawCleanRecommendationProvider(
+    normalizeConfig({ taskStateEstimator: { enabled: false } }),
+    modelClient,
+  );
+
+  assert.ok(provider);
+  const result = await analyzeContextCleanRecommendations({
+    tasks: [plan.tasks[0]!],
+    provider,
+  });
+
+  assert.equal(requests, 1);
+  assert.equal(result.fallbackUsed, false);
+  assert.equal(result.tasks[0]?.recommendation, "clean");
+  assert.equal(result.tasks[0]?.selectable, true);
 });
 
 test("native clean handler returns actionable usage for invalid arguments", async () => {

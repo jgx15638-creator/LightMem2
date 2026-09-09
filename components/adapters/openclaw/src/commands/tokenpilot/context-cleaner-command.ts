@@ -6,11 +6,15 @@ import {
   readContextCleanPlan,
   type ContextCleanPlan,
   type ContextCleanReceipt,
+  type ContextCleanRecommendationProvider,
   type ContextCleanerHostBridge,
 } from "@lightrsi/cleaner";
+import type { JsonModelClient } from "@lightrsi/runtime-core";
 
 import { createOpenClawContextCleanerBridge } from "../../context-cleaner/index.js";
+import { ensureOpenClawCleanerTaskRegistry } from "../../context-cleaner/task-registry-bootstrap.js";
 import { normalizeConfig } from "../../context-stack/integration/config-normalize.js";
+import type { NormalizedPluginRuntimeConfig } from "../../context-stack/integration/config-types.js";
 import { resolveSessionIdFromCommandScope } from "../../session/command-scope-map.js";
 import { pluginConfigRecord } from "./host-config-adapter.js";
 
@@ -31,6 +35,24 @@ type ParsedCleanArgs = {
   cancel: boolean;
   help: boolean;
 };
+
+export function loadOpenClawContextCleanerConfig(
+  api: any,
+): Record<string, unknown> | Promise<Record<string, unknown>> {
+  const currentConfig = api?.config;
+  if (currentConfig && typeof currentConfig === "object" && !Array.isArray(currentConfig)) {
+    return currentConfig as Record<string, unknown>;
+  }
+
+  const legacyConfigApi = api?.runtime?.config;
+  if (typeof legacyConfigApi?.loadConfig === "function") {
+    return legacyConfigApi.loadConfig.call(legacyConfigApi) as
+      | Record<string, unknown>
+      | Promise<Record<string, unknown>>;
+  }
+
+  throw new Error("clean_config_unavailable");
+}
 
 export function formatOpenClawCleanUsage(): string {
   return [
@@ -140,7 +162,29 @@ function storeFailure(operation: string, reasons: string[]): never {
   throw new Error(`${operation}:${reasons.join(",") || "unknown"}`);
 }
 
-export function createOpenClawCleanBackend(currentConfig: Record<string, unknown>): OpenClawCleanBackend {
+export function createOpenClawCleanRecommendationProvider(
+  normalized: NormalizedPluginRuntimeConfig,
+  modelClient?: JsonModelClient,
+): ContextCleanRecommendationProvider | undefined {
+  const config = {
+    baseUrl: normalized.taskStateEstimator.baseUrl,
+    apiKey: normalized.taskStateEstimator.apiKey,
+    model: normalized.taskStateEstimator.model,
+    requestTimeoutMs: normalized.taskStateEstimator.requestTimeoutMs,
+  };
+  if (modelClient) {
+    return createApiContextCleanRecommendationProvider(config, () => modelClient);
+  }
+  return normalized.taskStateEstimator.enabled
+    ? createApiContextCleanRecommendationProvider(config)
+    : undefined;
+}
+
+export function createOpenClawCleanBackend(
+  currentConfig: Record<string, unknown>,
+  logger?: { warn?: (message: string) => void },
+  modelClient?: JsonModelClient,
+): OpenClawCleanBackend {
   const normalized = normalizeConfig(pluginConfigRecord(currentConfig));
   const stateDir = normalized.stateDir.trim();
   if (!stateDir) throw new Error("clean_state_dir_missing");
@@ -150,14 +194,7 @@ export function createOpenClawCleanBackend(currentConfig: Record<string, unknown
     controlPlane,
     config: { replacementMode: normalized.eviction.replacementMode },
   });
-  const provider = normalized.taskStateEstimator.enabled
-    ? createApiContextCleanRecommendationProvider({
-        baseUrl: normalized.taskStateEstimator.baseUrl,
-        apiKey: normalized.taskStateEstimator.apiKey,
-        model: normalized.taskStateEstimator.model,
-        requestTimeoutMs: normalized.taskStateEstimator.requestTimeoutMs,
-      })
-    : undefined;
+  const provider = createOpenClawCleanRecommendationProvider(normalized, modelClient);
 
   async function readPlan(planId: string): Promise<ContextCleanPlan | undefined> {
     const result = await readContextCleanPlan({ stateDir, planId });
@@ -168,6 +205,13 @@ export function createOpenClawCleanBackend(currentConfig: Record<string, unknown
   return {
     stateDir,
     async analyze(sessionId) {
+      await ensureOpenClawCleanerTaskRegistry({
+        currentConfig,
+        normalized,
+        sessionId,
+        logger,
+        modelClient,
+      });
       return (await analyzeContextCleanSession({ stateDir, bridge, sessionId, provider })).plan;
     },
     readPlan,
@@ -235,13 +279,22 @@ export async function handleOpenClawContextCleanCommand(params: {
 export function createOpenClawContextCleanerCommandHandler(params: {
   loadConfig(): Promise<Record<string, unknown>> | Record<string, unknown>;
   createBackend?: (currentConfig: Record<string, unknown>) => OpenClawCleanBackend;
+  logger?: { warn?: (message: string) => void };
+  createModelClient?: (ctx: any) => JsonModelClient | undefined;
 }) {
   return async (ctx: any, rawArgs: string): Promise<{ text: string }> => {
     if (["--help", "-h"].includes(rawArgs.trim())) {
       return { text: formatOpenClawCleanUsage() };
     }
     try {
-      const backend = (params.createBackend ?? createOpenClawCleanBackend)(await params.loadConfig());
+      const currentConfig = await params.loadConfig();
+      const backend = params.createBackend
+        ? params.createBackend(currentConfig)
+        : createOpenClawCleanBackend(
+            currentConfig,
+            params.logger,
+            params.createModelClient?.(ctx),
+          );
       return await handleOpenClawContextCleanCommand({ ctx, rawArgs, backend });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

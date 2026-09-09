@@ -83,6 +83,10 @@ export type PolicyModuleConfig = {
   stateDir?: string;
 };
 
+export type PolicyModuleDependencies = {
+  createTaskStateEstimator?: (config: TaskStateEstimatorApiConfig) => TaskStateEstimator;
+};
+
 export type PolicyCacheHealthMode = "warm" | "uncertain" | "cold";
 
 export type PolicyOnlineConfigSnapshot = {
@@ -1708,14 +1712,19 @@ async function maybeRunTaskStateEstimator(
   }
 }
 
-export function createPolicyModule(cfg: PolicyModuleConfig = {}): RuntimeModule {
+export function createPolicyModule(
+  cfg: PolicyModuleConfig = {},
+  dependencies: PolicyModuleDependencies = {},
+): RuntimeModule {
   const config = normalizeConfig(cfg);
   const stateBySession = new Map<string, PolicySessionState>();
   let taskStateEstimator: TaskStateEstimator | null = null;
   let estimatorCreationError: string | null = null;
   if (config.taskStateEstimator.enabled) {
     try {
-      taskStateEstimator = createApiTaskStateEstimator(config.taskStateEstimator);
+      taskStateEstimator = (dependencies.createTaskStateEstimator ?? createApiTaskStateEstimator)(
+        config.taskStateEstimator,
+      );
     } catch (error) {
       estimatorCreationError = error instanceof Error ? error.message : String(error);
     }

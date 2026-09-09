@@ -24,6 +24,23 @@ export async function syncRawSemanticTurnsFromTranscript(
   if (!messages || messages.length === 0) {
     return { changed: false, turnCount: 0, updatedTurnSeqs: [] };
   }
+  return syncRawSemanticTurnsFromMessages(stateDir, sessionId, messages, helpers);
+}
+
+/**
+ * Projects an already-authoritative runtime message list into the shared raw
+ * semantic turn store. OpenClaw 2026.9 may keep the live transcript in SQLite,
+ * so a Context Engine cannot assume that a legacy JSONL transcript exists.
+ */
+export async function syncRawSemanticTurnsFromMessages(
+  stateDir: string,
+  sessionId: string,
+  messages: any[],
+  helpers: TranscriptHelpers,
+): Promise<{ changed: boolean; turnCount: number; updatedTurnSeqs: number[] }> {
+  if (!messages || messages.length === 0) {
+    return { changed: false, turnCount: 0, updatedTurnSeqs: [] };
+  }
   let turnCount = 0;
   for (const message of messages) {
     if (String(message?.role ?? "").toLowerCase() === "user") {
