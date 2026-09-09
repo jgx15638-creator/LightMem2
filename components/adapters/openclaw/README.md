@@ -61,11 +61,34 @@ Analyze an OpenClaw session without changing its context:
 lightrsi openclaw clean --session <session-id>
 ```
 
+The same flow is available inside an active OpenClaw conversation through the
+plugin's native command surface:
+
+```text
+/lightrsi clean
+/lightrsi clean --session <session-id>
+```
+
+The first form resolves the current conversation's mapped TokenPilot session.
+If no mapping is available, pass the session id explicitly. Analysis never
+applies a rewrite by itself.
+
 Apply only tasks selected from that immutable plan:
 
 ```bash
 lightrsi openclaw clean --plan <plan-id> --select <task-id,...>
 ```
+
+Or apply and inspect the plan from the OpenClaw conversation:
+
+```text
+/lightrsi clean --plan <plan-id> --select <task-id,...>
+/lightrsi clean --status <plan-id>
+/lightrsi clean --cancel <plan-id>
+```
+
+`/tokenpilot clean` and `/tp clean` are equivalent aliases. Active, current,
+and unresolved tasks remain protected by the canonical Cleaner validation.
 
 OpenClaw archives selected task content before atomically committing the
 canonical rewrite. Unlike scheduled Codex and Claude Code rewrites, a successful
