@@ -40,8 +40,17 @@ export type AnalyzeContextCleanSessionParams = {
   loadRegistry?: (stateDir: string, sessionId: string) => Promise<SessionTaskRegistry>;
 };
 
-function canonicalPlanId(plan: Omit<ContextCleanPlan, "planId">): string {
-  const digest = createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 24);
+function canonicalPlanId(
+  plan: Omit<ContextCleanPlan, "planId">,
+  analysis: { fallbackUsed: boolean; reasons: string[] },
+): string {
+  // The analyzed receipt is immutable state associated with the plan id too.
+  // Include its recommendation outcome so two analyses that produce the same
+  // task view but different fallback evidence cannot alias the same plan.
+  const digest = createHash("sha256")
+    .update(JSON.stringify({ plan, analysis }))
+    .digest("hex")
+    .slice(0, 24);
   return `ctxclean-${digest}`;
 }
 
@@ -132,7 +141,10 @@ export async function analyzeContextCleanSession(
   };
   const plan: ContextCleanPlan = {
     ...planWithoutId,
-    planId: canonicalPlanId(planWithoutId),
+    planId: canonicalPlanId(planWithoutId, {
+      fallbackUsed: recommended.fallbackUsed,
+      reasons: recommended.reasons,
+    }),
   };
   const saved = await saveContextCleanPlan({ stateDir: params.stateDir, plan });
   if (saved.bypassed) throwStoreFailure("clean_analysis_plan_store_failed", saved.reasons);
