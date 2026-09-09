@@ -77,6 +77,10 @@ import { createOpenClawContextCleanerBridge } from "./context-cleaner/index.js";
 module.exports = {
   id: "tokenpilot",
   name: "TokenPilot Runtime Optimizer",
+  description: "Token-efficiency runtime plugin for OpenClaw with pluggable routing and optimization hooks.",
+  // OpenClaw 2026.9+ reads the exclusive slot from openclaw.plugin.json.
+  // Keep the entry-level kind as a compatibility fallback for older hosts.
+  kind: "context-engine",
   __testHooks,
   createOpenClawContextCleanerBridge,
 

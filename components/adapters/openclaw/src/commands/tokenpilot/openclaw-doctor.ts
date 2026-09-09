@@ -121,7 +121,7 @@ export function inspectOpenClawDoctor(currentConfig?: Record<string, unknown>): 
     },
     {
       key: "contextEngineSlot",
-      ok: contextEngineSlot === "layered-context",
+      ok: contextEngineSlot === "tokenpilot",
       detail: `plugins.slots.contextEngine: ${contextEngineSlot || "(unset)"}`,
     },
     {
