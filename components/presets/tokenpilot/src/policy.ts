@@ -433,6 +433,7 @@ function buildPatchFromTaskUpdates(
   toTurnSeqInclusive: number,
   options?: {
     allowActiveToEvictable?: boolean;
+    allowNewToEvictable?: boolean;
     collapseCompletedIntoEvictable?: boolean;
   },
 ): {
@@ -473,6 +474,7 @@ function buildPatchFromTaskUpdates(
     const fromHasCompletionEvidence = hasCompletionEvidence(previous);
     const toHasCompletionEvidence = mergedCompletionEvidence.length > 0;
     const allowActiveToEvictable = options?.allowActiveToEvictable === true;
+    const allowNewToEvictable = options?.allowNewToEvictable === true;
     const collapseCompletedIntoEvictable = options?.collapseCompletedIntoEvictable === true;
 
     if (toLifecycle === "completed" && !toHasCompletionEvidence) {
@@ -486,7 +488,7 @@ function buildPatchFromTaskUpdates(
     }
     if (toLifecycle === "evictable") {
       if (!allowActiveToEvictable) {
-        if (fromLifecycle === "active" || !previous) {
+        if (fromLifecycle === "active") {
           rejectedUpdates.push({
             taskId,
             ...(fromLifecycle ? { from: fromLifecycle } : {}),
@@ -495,7 +497,10 @@ function buildPatchFromTaskUpdates(
           });
           continue;
         }
-        if (fromLifecycle !== "completed" && fromLifecycle !== "evictable") {
+        if (
+          (!previous && !allowNewToEvictable)
+          || (previous && fromLifecycle !== "completed" && fromLifecycle !== "evictable")
+        ) {
           rejectedUpdates.push({
             taskId,
             ...(fromLifecycle ? { from: fromLifecycle } : {}),
@@ -1592,6 +1597,12 @@ async function maybeRunTaskStateEstimator(
       estimatorWindow.toTurnSeqInclusive,
       {
         allowActiveToEvictable: evidenceMode === "two_state",
+        // A batched estimator can discover an already-finished historical task
+        // for the first time after the session has moved on. The estimator
+        // prompt permits that task to be emitted directly as evictable when it
+        // carries completion evidence; rejecting it here silently drops its
+        // turn attribution from the registry.
+        allowNewToEvictable: config.taskStateEstimator.lifecycleMode === "coupled",
         collapseCompletedIntoEvictable: evidenceMode === "two_state",
       },
     );

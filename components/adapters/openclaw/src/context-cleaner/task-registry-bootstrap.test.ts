@@ -260,3 +260,83 @@ test("cleaner task bootstrap uses a Host-managed model client without provider c
     await rm(stateDir, { recursive: true, force: true });
   }
 });
+
+test("cleaner task bootstrap keeps first-seen historical tasks emitted as evictable", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "openclaw-cleaner-first-seen-evictable-"));
+  const sessionId = "session-cleaner-first-seen-evictable";
+  const taskA = `${sessionId}:t1-task`;
+  const taskB = `${sessionId}:t2-task`;
+  const taskC = `${sessionId}:t3-task`;
+  try {
+    const messages = [
+      { role: "user", content: "Task A" },
+      { role: "assistant", content: "Task A is complete." },
+      { role: "user", content: "Task B" },
+      { role: "assistant", content: "Task B is complete." },
+      { role: "user", content: "Task C" },
+      { role: "assistant", content: "Task C is blocked pending approval." },
+    ];
+    await saveCanonicalState(stateDir, {
+      version: 1,
+      sessionId,
+      messages,
+      seenMessageIds: messages.map((_, index) => `m${index + 1}`),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const registry = await ensureOpenClawCleanerTaskRegistry({
+      currentConfig: {
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      },
+      normalized: normalizeConfig({ stateDir }),
+      sessionId,
+      modelClient: {
+        async request() {
+          return {
+            text: JSON.stringify({
+              baseVersion: 0,
+              taskUpdates: [
+                {
+                  taskId: taskA,
+                  objective: "Complete Task A.",
+                  lifecycle: "evictable",
+                  coveredTurnAbsIds: [`${sessionId}:t1`],
+                  completionEvidence: ["Task A is complete."],
+                  unresolvedQuestions: [],
+                  evictableReason: "The session moved on to Task B.",
+                },
+                {
+                  taskId: taskB,
+                  objective: "Complete Task B.",
+                  lifecycle: "evictable",
+                  coveredTurnAbsIds: [`${sessionId}:t2`],
+                  completionEvidence: ["Task B is complete."],
+                  unresolvedQuestions: [],
+                  evictableReason: "The session moved on to Task C.",
+                },
+                {
+                  taskId: taskC,
+                  objective: "Complete Task C after approval.",
+                  lifecycle: "blocked",
+                  coveredTurnAbsIds: [`${sessionId}:t3`],
+                  completionEvidence: [],
+                  unresolvedQuestions: ["Approval is pending."],
+                  currentSubgoal: "Wait for approval.",
+                },
+              ],
+            }),
+          };
+        },
+      },
+    });
+
+    assert.deepEqual(Object.keys(registry.tasks), [taskA, taskB, taskC]);
+    assert.deepEqual(registry.evictableTaskIds, [taskA, taskB]);
+    assert.equal(registry.tasks[taskC]?.lifecycle, "blocked");
+    assert.deepEqual(registry.turnToTaskIds[`${sessionId}:t1`], [taskA]);
+    assert.deepEqual(registry.turnToTaskIds[`${sessionId}:t2`], [taskB]);
+    assert.deepEqual(registry.turnToTaskIds[`${sessionId}:t3`], [taskC]);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
