@@ -52,7 +52,7 @@ test("a full delta from turn 0 covers all turns", () => {
   assert.equal(delta.messages.length, 2);
 });
 
-test("Claude full-history requests contribute only their newest user turn", () => {
+test("Claude full-history requests carry the previous assistant completion into the newest user turn", () => {
   const history = [
     { role: "user", content: "old request" },
     { role: "assistant", content: "old answer" },
@@ -63,5 +63,41 @@ test("Claude full-history requests contribute only their newest user turn", () =
     turnSeq: 2,
     messages: sliceClaudeMessagesForCurrentUserTurn(history),
   });
-  assert.deepEqual(record.messages.map((message) => message.text), ["current request"]);
+  assert.deepEqual(record.messages.map((message) => message.text), ["old answer", "current request"]);
+});
+
+test("Claude tool-result requests retain the immediately preceding tool call", () => {
+  const history = [
+    { role: "user", content: "read the fixture" },
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "toolu_read", name: "Read", input: { file_path: "/fixture" } }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "toolu_read", content: "fixture body" }],
+    },
+  ];
+  const record = buildRawSemanticTurnRecord({
+    sessionId: SESSION,
+    turnSeq: 2,
+    messages: sliceClaudeMessagesForCurrentUserTurn(history),
+  });
+
+  assert.deepEqual(record.toolCalls.map((call) => call.toolCallId), ["toolu_read"]);
+  assert.deepEqual(record.toolResults.map((result) => result.toolCallId), ["toolu_read"]);
+});
+
+test("Claude internal suggestion and title requests do not enter semantic task history", () => {
+  const suggestion = [{
+    role: "user",
+    content: "[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]",
+  }];
+  const title = [{
+    role: "user",
+    content: "<session>real task</session>\nWrite the title in the predominant language of the session.",
+  }];
+
+  assert.deepEqual(sliceClaudeMessagesForCurrentUserTurn(suggestion), []);
+  assert.deepEqual(sliceClaudeMessagesForCurrentUserTurn(title), []);
 });

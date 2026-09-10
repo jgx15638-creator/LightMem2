@@ -206,6 +206,33 @@ test("Claude cleaner bridge preserves approved targets and receipt evidence", as
   }
 });
 
+test("Claude cleaner bridge accepts a scheduled receipt after recommendation fallback", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-claude-cleaner-fallback-schedule-"));
+  const bridge = createClaudeCodeContextCleanerBridge({
+    stateDir,
+    controlPlane: {
+      ...fakeControlPlane(),
+      async executeApprovedClean() {
+        return { ...pendingReceipt("scheduled"), fallbackUsed: true };
+      },
+    },
+  });
+  try {
+    const receipt = await bridge.executeApprovedClean(approval());
+    assert.equal(receipt.status, "scheduled");
+    assert.equal(receipt.fallbackUsed, true);
+
+    const local = await readClaudeCleanerSchedule({ stateDir, sessionId: SESSION });
+    assert.equal(local.outcome, "ready");
+    if (local.outcome === "ready") {
+      assert.equal(local.record.cleanPlanId, PLAN);
+      assert.deepEqual(local.record.selectedTaskIds, ["task-1"]);
+    }
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("Claude cleaner bridge rejects cross-host or mutated approvals before execution", async () => {
   let executions = 0;
   const bridge = createClaudeCodeContextCleanerBridge({

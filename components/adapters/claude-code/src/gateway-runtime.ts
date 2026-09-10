@@ -88,6 +88,36 @@ type ClaudeCodeGatewayRuntimeDependencies = {
 };
 
 const CLAUDE_LIFECYCLE_PLAN_SOURCE = "claude-lifecycle";
+const CLAUDE_CLEAN_APPLY_COMMAND = "<command-name>/lightrsi-clean-apply</command-name>";
+
+function anthropicMessageText(message: unknown): string {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return "";
+  const content = (message as Record<string, unknown>).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (!block || typeof block !== "object" || Array.isArray(block)) return "";
+      const entry = block as Record<string, unknown>;
+      return typeof entry.text === "string" ? entry.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** Claude expands a slash skill into adjacent user messages before asking the
+ * model to invoke its command. That control-only request must not replace the
+ * business snapshot that the user just reviewed and is approving. */
+function isClaudeCleanApplyControlRequest(messages: unknown[]): boolean {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || typeof message !== "object" || Array.isArray(message)) break;
+    const role = (message as Record<string, unknown>).role;
+    if (role !== "user") break;
+    if (anthropicMessageText(message).includes(CLAUDE_CLEAN_APPLY_COMMAND)) return true;
+  }
+  return false;
+}
 
 function isSyntheticClaudeSessionId(sessionId: string): boolean {
   return sessionId.startsWith("claude-synth-");
@@ -355,6 +385,7 @@ export async function startClaudeCodeGatewayRuntime(params: {
       const plannerMessages = Array.isArray((payload as Record<string, unknown>).messages)
         ? (payload as Record<string, unknown>).messages as unknown[]
         : [];
+      const cleanerApplyControlRequest = isClaudeCleanApplyControlRequest(plannerMessages);
       const cleanerSnapshotRevision = _createHash("sha256")
         .update(JSON.stringify(plannerMessages))
         .digest("hex")
@@ -376,11 +407,17 @@ export async function startClaudeCodeGatewayRuntime(params: {
       let lifecyclePlannerStatus: "completed" | "deferred" | "bypassed" | "not_configured" = "not_configured";
       let lifecyclePlannerReasonCodes: string[] = [];
       let lifecycleRegistryVersion: number | undefined;
+      let semanticTurnByToolCallId: ReadonlyMap<string, string> | undefined;
       let manualCleanerOverlay: Extract<
         Awaited<ReturnType<typeof prepareClaudeCleanerOverlay>>,
         { outcome: "prepared" }
       > | undefined;
-      let manualCleanerSuppressesAutomaticEviction = false;
+      let manualCleanerSuppressesAutomaticEviction = cleanerApplyControlRequest;
+
+      if (cleanerApplyControlRequest) {
+        lifecyclePlannerStatus = "deferred";
+        lifecyclePlannerReasonCodes = ["manual_cleaner_apply_control_request"];
+      }
 
       // A scheduled manual clean owns the next safe rewrite boundary. Check the
       // adapter-local marker before lifecycle analysis so an automatic planner
@@ -435,6 +472,7 @@ export async function startClaudeCodeGatewayRuntime(params: {
             messages: plannerMessages,
           });
           if (prep.ok) {
+            semanticTurnByToolCallId = prep.turnAbsIdByToolCallId;
             const plannerRevision = _createHash("sha256")
               .update(JSON.stringify(plannerMessages))
               .digest("hex")
@@ -536,6 +574,7 @@ export async function startClaudeCodeGatewayRuntime(params: {
             snapshot: baseCleanerSnapshot,
             messages: plannerMessages,
             registry: cleanerRegistry,
+            turnAbsIdByToolCallId: semanticTurnByToolCallId,
           });
         } catch (error) {
           // Task attribution is optional. Keep the canonical snapshot even when
@@ -599,7 +638,7 @@ export async function startClaudeCodeGatewayRuntime(params: {
 
       // A prepared manual overlay keeps the approval-time snapshot as its retry
       // anchor until the upstream accepts and the applied receipt commits.
-      if (!manualCleanerOverlay) {
+      if (!manualCleanerOverlay && !cleanerApplyControlRequest) {
         await persistCleanerSnapshot();
       }
 

@@ -221,51 +221,192 @@ function buildUserPayload(
   });
 }
 
-function normalizeTaskUpdate(update: SemanticTaskUpdate): SemanticTaskUpdate {
+function stringField(
+  update: Record<string, unknown>,
+  names: string[],
+): string | undefined {
+  for (const name of names) {
+    const value = update[name];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function stringArrayField(
+  update: Record<string, unknown>,
+  names: string[],
+): string[] | undefined {
+  for (const name of names) {
+    const value = update[name];
+    if (typeof value === "string" && value.trim()) return [value.trim()];
+    if (Array.isArray(value)) {
+      return uniqueStrings(
+        value.filter((entry): entry is string => typeof entry === "string"),
+      );
+    }
+  }
+  return undefined;
+}
+
+function normalizeLifecycle(value: unknown): SemanticTaskUpdate["lifecycle"] | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["active", "in_progress", "ongoing", "open", "pending", "protected", "keep"].includes(normalized)) {
+    return "active";
+  }
+  if (["blocked", "waiting", "waiting_for_approval", "pending_approval", "on_hold"].includes(normalized)) {
+    return "blocked";
+  }
+  if (["completed", "complete", "done", "finished"].includes(normalized)) {
+    return "completed";
+  }
+  if (["evictable", "evict", "clean", "removable", "releasable"].includes(normalized)) {
+    return "evictable";
+  }
+  return undefined;
+}
+
+function coveredTurnFallback(
+  taskId: string,
+  input: TaskStateEstimatorInput,
+): string[] {
+  const taskIdMatch = input.delta.coveredTurnAbsIds.find(
+    (turnAbsId) => taskId === turnAbsId || taskId.startsWith(`${turnAbsId}-`) || taskId.startsWith(`${turnAbsId}:`),
+  );
+  if (taskIdMatch) return [taskIdMatch];
+  if (input.delta.coveredTurnAbsIds.length === 1) return [...input.delta.coveredTurnAbsIds];
+  return [];
+}
+
+function normalizeTaskUpdate(
+  value: unknown,
+  input: TaskStateEstimatorInput,
+): SemanticTaskUpdate | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const update = value as Record<string, unknown>;
+  const taskId = stringField(update, ["taskId", "task_id", "id"]);
+  if (!taskId) return undefined;
+
+  const previous = input.registry.tasks[taskId];
+  const title = stringField(update, ["title", "taskTitle", "task_title"]);
+  const currentSubgoal = stringField(update, ["currentSubgoal", "current_subgoal", "subgoal"]);
+  const rawCompletionEvidence = stringArrayField(update, [
+    "completionEvidence",
+    "completion_evidence",
+    "evidence",
+  ]);
+  const unresolvedQuestions = stringArrayField(update, [
+    "unresolvedQuestions",
+    "unresolved_questions",
+    "openQuestions",
+    "open_questions",
+  ]);
+  const lifecycle = normalizeLifecycle(
+    update.lifecycle ?? update.status ?? update.state ?? update.action,
+  ) ?? (
+    (rawCompletionEvidence?.length ?? 0) > 0
+      ? "completed"
+      : (unresolvedQuestions?.length ?? 0) > 0
+        ? "blocked"
+        : "active"
+  );
+  const allowedTurnIds = new Set(input.delta.coveredTurnAbsIds);
+  const rawCoveredTurnAbsIds = stringArrayField(update, [
+    "coveredTurnAbsIds",
+    "covered_turn_abs_ids",
+    "turnAbsIds",
+    "turn_abs_ids",
+    "turnIds",
+    "turn_ids",
+  ]);
+  let coveredTurnAbsIds = uniqueStrings(rawCoveredTurnAbsIds ?? [])
+    .filter((turnAbsId) => allowedTurnIds.has(turnAbsId));
+  if (coveredTurnAbsIds.length === 0 && !previous) {
+    coveredTurnAbsIds = coveredTurnFallback(taskId, input);
+  }
+  const coveredUserObjective = input.delta.messages.find(
+    (message) => message.role === "user" && coveredTurnAbsIds.includes(message.anchor.turnAbsId),
+  )?.text.trim();
+  const objective = stringField(update, ["objective", "description", "task", "summary"])
+    ?? previous?.objective
+    ?? title
+    ?? currentSubgoal
+    ?? coveredUserObjective
+    ?? "";
+
+  let completionEvidence = rawCompletionEvidence;
+  if (
+    (lifecycle === "completed" || lifecycle === "evictable")
+    && (completionEvidence?.length ?? 0) === 0
+    && !previous?.completionEvidence?.length
+  ) {
+    const deliveredTurn = input.delta.messages.find(
+      (message) => message.role === "assistant" && coveredTurnAbsIds.includes(message.anchor.turnAbsId),
+    )?.anchor.turnAbsId;
+    if (deliveredTurn) completionEvidence = [`Assistant response recorded for ${deliveredTurn}`];
+  }
+
   return {
-    taskId: String(update.taskId ?? "").trim(),
-    ...(typeof update.title === "string" && update.title.trim()
-      ? { title: update.title.trim() }
-      : {}),
-    objective: String(update.objective ?? "").trim(),
-    lifecycle: update.lifecycle,
-    ...(Array.isArray(update.coveredTurnAbsIds)
-      ? {
-          coveredTurnAbsIds: update.coveredTurnAbsIds
-            .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-            .map((value) => value.trim()),
-        }
-      : {}),
-    ...(Array.isArray(update.completionEvidence)
-      ? {
-          completionEvidence: update.completionEvidence
-            .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-            .map((value) => value.trim()),
-        }
-      : {}),
-    ...(Array.isArray(update.unresolvedQuestions)
-      ? {
-          unresolvedQuestions: update.unresolvedQuestions
-            .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-            .map((value) => value.trim()),
-        }
-      : {}),
-    ...(typeof update.currentSubgoal === "string" && update.currentSubgoal.trim()
-      ? { currentSubgoal: update.currentSubgoal.trim() }
-      : {}),
-    ...(typeof update.evictableReason === "string" && update.evictableReason.trim()
-      ? { evictableReason: update.evictableReason.trim() }
+    taskId,
+    ...(title ? { title } : {}),
+    objective,
+    lifecycle,
+    ...(coveredTurnAbsIds.length > 0 ? { coveredTurnAbsIds } : {}),
+    ...(completionEvidence ? { completionEvidence } : {}),
+    ...(unresolvedQuestions ? { unresolvedQuestions } : {}),
+    ...(currentSubgoal ? { currentSubgoal } : {}),
+    ...(stringField(update, ["evictableReason", "evictable_reason", "reason"])
+      ? { evictableReason: stringField(update, ["evictableReason", "evictable_reason", "reason"])! }
       : {}),
   };
 }
 
+function mergeTaskUpdates(updates: SemanticTaskUpdate[]): SemanticTaskUpdate[] {
+  const merged = new Map<string, SemanticTaskUpdate>();
+  for (const update of updates) {
+    const previous = merged.get(update.taskId);
+    if (!previous) {
+      merged.set(update.taskId, update);
+      continue;
+    }
+    merged.set(update.taskId, {
+      ...previous,
+      ...update,
+      coveredTurnAbsIds: uniqueStrings([
+        ...(previous.coveredTurnAbsIds ?? []),
+        ...(update.coveredTurnAbsIds ?? []),
+      ]),
+      completionEvidence: uniqueStrings([
+        ...(previous.completionEvidence ?? []),
+        ...(update.completionEvidence ?? []),
+      ]),
+      unresolvedQuestions: uniqueStrings(
+        update.unresolvedQuestions ?? previous.unresolvedQuestions ?? [],
+      ),
+    });
+  }
+  return [...merged.values()];
+}
+
 function normalizeEstimatorOutput(
-  parsed: TaskStateEstimatorOutput,
+  parsed: Record<string, unknown>,
   input: TaskStateEstimatorInput,
 ): TaskStateEstimatorOutput {
-  const taskUpdates = Array.isArray(parsed.taskUpdates)
-    ? parsed.taskUpdates.map((update) => normalizeTaskUpdate(update))
-    : [];
+  const rawTaskUpdates = Array.isArray(parsed.taskUpdates)
+    ? parsed.taskUpdates
+    : Array.isArray(parsed.task_updates)
+      ? parsed.task_updates
+      : Array.isArray(parsed.updates)
+        ? parsed.updates
+        : [];
+  const taskUpdates = mergeTaskUpdates(
+    rawTaskUpdates
+      .map((update) => normalizeTaskUpdate(update, input))
+      .filter((update): update is SemanticTaskUpdate => update !== undefined),
+  );
+  if (rawTaskUpdates.length > 0 && taskUpdates.length === 0) {
+    throw new Error("task_state_estimator_invalid_task_updates");
+  }
   return {
     baseVersion: input.registry.version,
     taskUpdates,
@@ -285,11 +426,14 @@ function parseEstimatorOutput(
     fenced ?? trimmed,
     trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1),
   ]);
-  let parsed: TaskStateEstimatorOutput | undefined;
+  let parsed: Record<string, unknown> | undefined;
   for (const candidate of candidates) {
     if (!candidate.startsWith("{") || !candidate.endsWith("}")) continue;
     try {
-      parsed = JSON.parse(candidate) as TaskStateEstimatorOutput;
+      const candidateValue = JSON.parse(candidate) as unknown;
+      if (candidateValue && typeof candidateValue === "object" && !Array.isArray(candidateValue)) {
+        parsed = candidateValue as Record<string, unknown>;
+      }
       break;
     } catch {
       // Try the next bounded JSON candidate without retaining provider text.
@@ -298,10 +442,8 @@ function parseEstimatorOutput(
   if (!parsed) {
     throw new Error("task_state_estimator_invalid_json");
   }
-  if (typeof parsed?.baseVersion !== "number") {
-    throw new Error("task_state_estimator_missing_base_version");
-  }
-  if (!Array.isArray(parsed.taskUpdates)) {
+  const rawTaskUpdates = parsed.taskUpdates ?? parsed.task_updates ?? parsed.updates;
+  if (!Array.isArray(rawTaskUpdates)) {
     throw new Error("task_state_estimator_missing_task_updates");
   }
   return normalizeEstimatorOutput(parsed, input);

@@ -44,6 +44,26 @@ function flattenSystemText(system: unknown): string | undefined {
   return text || undefined;
 }
 
+function appendStructuredSystemInstructions(params: {
+  rawSystem: unknown[];
+  originalText: unknown;
+  nextText: unknown;
+}): unknown[] {
+  const originalText = typeof params.originalText === "string"
+    ? params.originalText
+    : flattenSystemText(params.rawSystem) ?? "";
+  if (params.nextText === originalText) return params.rawSystem;
+  if (typeof params.nextText !== "string" || !params.nextText.startsWith(originalText)) {
+    throw new Error("structured Anthropic system changed non-append-only during envelope preparation");
+  }
+  const appendedText = params.nextText.slice(originalText.length);
+  if (!appendedText) return params.rawSystem;
+  return [
+    ...params.rawSystem,
+    { type: "text", text: appendedText },
+  ];
+}
+
 function ensureSyntheticSessionId(payload: Record<string, unknown>): string {
   const metadata = asRecord(payload.metadata);
   const existing = normalizeSessionId(metadata.tokenpilotSyntheticSessionId);
@@ -235,10 +255,11 @@ export function createClaudeMessagesPayloadCodec(
       const rawSystem = metadata.__anthropicRawSystem;
       const originalSystemText = metadata.__anthropicSystemText;
       if (rawSystem !== undefined && Array.isArray(rawSystem)) {
-        if (envelope.instructions !== originalSystemText) {
-          throw new Error("structured Anthropic system changed during envelope preparation");
-        }
-        nextPayload.system = rawSystem;
+        nextPayload.system = appendStructuredSystemInstructions({
+          rawSystem,
+          originalText: originalSystemText,
+          nextText: envelope.instructions,
+        });
       } else if (typeof envelope.instructions === "string") {
         nextPayload.system = envelope.instructions;
       } else {

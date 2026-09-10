@@ -186,3 +186,32 @@ test("codec preserves structured Anthropic system blocks and cache metadata", ()
   assert.deepEqual(encoded.system, system);
   assert.equal("prompt_cache_key" in encoded, false);
 });
+
+test("codec appends pipeline instructions to structured Anthropic system blocks", async () => {
+  const codec = createClaudeMessagesPayloadCodec();
+  const system = [
+    {
+      type: "text",
+      text: "You are a stable coding agent.",
+      cache_control: { type: "ephemeral", ttl: "1h" },
+      unknown_field: { keep: true },
+    },
+    { type: "text", text: "Follow repository rules." },
+  ];
+  const envelope = codec.decodeRequest({
+    model: "claude-sonnet-4-6",
+    stream: false,
+    system,
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+  });
+
+  const prepared = await prepareBeforeCall({ envelope });
+  const encoded = codec.encodeRequest(prepared.envelope) as Record<string, unknown>;
+  const encodedSystem = encoded.system as Array<Record<string, unknown>>;
+
+  assert.equal(prepared.diagnostics.recoveryInjected, true);
+  assert.equal(encodedSystem.length, 3);
+  assert.deepEqual(encodedSystem.slice(0, 2), system);
+  assert.equal(encodedSystem[2]?.type, "text");
+  assert.match(String(encodedSystem[2]?.text ?? ""), /^\n\n\[Recovery Protocol\]/);
+});

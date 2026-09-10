@@ -61,9 +61,12 @@ async function main() {
   await runClaudeCodeHooksHandler(input, configPath);
 }
 
+export function isClaudeCodeHooksHandlerEntrypoint(value: string | undefined): boolean {
+  return typeof value === "string" && /(^|[\\/])hooks-handler\.(ts|js)$/.test(value);
+}
+
 if (
-  process.argv[1]
-  && /(^|\/)hooks-handler\.(ts|js)$/.test(process.argv[1])
+  isClaudeCodeHooksHandlerEntrypoint(process.argv[1])
 ) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));

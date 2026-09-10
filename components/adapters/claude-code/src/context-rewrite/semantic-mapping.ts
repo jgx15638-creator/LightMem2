@@ -19,13 +19,36 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** Claude resends its full message history. A semantic turn is only the tail
- * beginning at the newest user message, matching the transcript sync contract
- * used by the OpenClaw adapter. */
+function messageText(message: Record<string, unknown>): string {
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .map((blockRaw) => {
+      const block = asRecord(blockRaw);
+      return block?.type === "text" && typeof block.text === "string" ? block.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function isClaudeInternalMetadataRequest(message: Record<string, unknown>): boolean {
+  const text = messageText(message).trim();
+  return text.startsWith("[SUGGESTION MODE:")
+    || (text.startsWith("<session>")
+      && text.includes("Write the title in the predominant language of the session"));
+}
+
+/** Claude resends its full message history. Retain the newest user message and
+ * the immediately preceding assistant message. The latter contains either the
+ * tool call paired with a tool result or the previous task's delivered answer,
+ * which the lifecycle estimator needs as completion evidence. */
 export function sliceClaudeMessagesForCurrentUserTurn(messages: unknown[]): unknown[] {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = asRecord(messages[index]);
-    if (message?.role === "user") return messages.slice(index);
+    if (message?.role !== "user") continue;
+    if (isClaudeInternalMetadataRequest(message)) return [];
+    const previous = index > 0 ? asRecord(messages[index - 1]) : undefined;
+    return messages.slice(previous?.role === "assistant" ? index - 1 : index);
   }
   return messages;
 }

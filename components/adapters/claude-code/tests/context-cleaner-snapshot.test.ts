@@ -90,6 +90,29 @@ test("attributes a proven historical tool call/result pair from blockToTaskIds",
   );
 });
 
+test("attributes a historical pair through its unique semantic turn ownership", () => {
+  const inbound = messages();
+  const snapshot = buildClaudeContextSnapshot({
+    sessionId: SESSION,
+    revision: "revision-turn-proof",
+    messages: inbound as any,
+  });
+  const taskRegistry = registry({});
+  taskRegistry.turnToTaskIds = { [`${SESSION}:t1`]: ["task-read"] };
+
+  const attributed = (attributeClaudeSnapshotTasks as any)({
+    snapshot,
+    messages: inbound,
+    registry: taskRegistry,
+    turnAbsIdByToolCallId: new Map([["toolu_read", `${SESSION}:t1`]]),
+  });
+
+  const pair = attributed.items.filter((item: { callId?: string }) => item.callId === "toolu_read");
+  assert.equal(pair.length, 2);
+  assert.ok(pair.every((item: { taskIds?: string[] }) =>
+    JSON.stringify(item.taskIds) === JSON.stringify(["task-read"])));
+});
+
 test("leaves current-turn, ambiguous, and unknown-task mappings unassigned", () => {
   const currentToolPair = [
     ...messages().slice(0, -1),

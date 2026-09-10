@@ -9,7 +9,25 @@ import {
   writeTokenPilotClaudeCodeConfig,
 } from "../src/config.js";
 import { readClaudeCodeDaemonStatus } from "../src/daemon.js";
-import { runClaudeCodeHooksHandler } from "../src/hooks-handler.js";
+import {
+  isClaudeCodeHooksHandlerEntrypoint,
+  runClaudeCodeHooksHandler,
+} from "../src/hooks-handler.js";
+
+test("hooks-handler recognizes Windows and POSIX entrypoint paths", () => {
+  assert.equal(
+    isClaudeCodeHooksHandlerEntrypoint("C:\\repo\\dist\\hooks-handler.js"),
+    true,
+  );
+  assert.equal(
+    isClaudeCodeHooksHandlerEntrypoint("/repo/dist/hooks-handler.js"),
+    true,
+  );
+  assert.equal(
+    isClaudeCodeHooksHandlerEntrypoint("C:\\repo\\dist\\other.js"),
+    false,
+  );
+});
 
 test("hooks-handler entry function records Claude Code observability events", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-claude-hooks-handler-"));

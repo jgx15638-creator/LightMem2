@@ -22,7 +22,10 @@ import { normalizeTokenPilotClaudeCodeConfig } from "../src/config.js";
 import { startClaudeCodeGatewayRuntime } from "../src/gateway-runtime.js";
 import { createConsoleLogger } from "../src/logger.js";
 import { buildClaudeContextSnapshot } from "../src/context-rewrite/snapshot.js";
-import { saveLatestClaudeSnapshot } from "../src/context-rewrite/snapshot-store.js";
+import {
+  readLatestClaudeSnapshotRecord,
+  saveLatestClaudeSnapshot,
+} from "../src/context-rewrite/snapshot-store.js";
 import { persistSessionTaskRegistry } from "@lightrsi/history";
 
 const SESSION = "claude-cleaner-gateway-session";
@@ -76,6 +79,95 @@ function registry(): SessionTaskRegistry {
     lastProcessedTurnSeq: 1,
   };
 }
+
+test("slash clean apply control request preserves the approval-time snapshot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lightrsi-claude-cleaner-slash-apply-"));
+  const stateDir = join(root, "state");
+  const proxyPort = await reserveUnusedPort();
+  const historicalMessages = [
+    { role: "user", content: [{ type: "text", text: "COMPLETED_TASK_REQUEST" }] },
+    { role: "assistant", content: [{ type: "text", text: "COMPLETED_TASK_RESPONSE" }] },
+  ];
+  const baseSnapshot = buildClaudeContextSnapshot({
+    sessionId: SESSION,
+    revision: REVISION,
+    messages: historicalMessages as never,
+  });
+  const forwarder: HostGatewayForwarder = {
+    async requestRaw() { throw new Error("requestRaw not used"); },
+    async request() {
+      return {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        text: JSON.stringify({
+          id: "msg_slash_apply",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+      };
+    },
+    async requestStream() { throw new Error("requestStream not used"); },
+  };
+  const runtime = await startClaudeCodeGatewayRuntime({
+    config: normalizeTokenPilotClaudeCodeConfig({
+      stateDir,
+      proxyPort,
+      modules: { stabilizer: false, reduction: false, eviction: false },
+      taskStateEstimator: { enabled: false },
+    }),
+    logger: createConsoleLogger(false),
+    forwarder,
+  });
+
+  try {
+    assert.deepEqual(await saveLatestClaudeSnapshot(stateDir, SESSION, baseSnapshot), { saved: true });
+    const response = await fetch(`${runtime.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-session-id": SESSION },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        stream: false,
+        messages: [
+          ...historicalMessages,
+          {
+            role: "user",
+            content: [{
+              type: "text",
+              text: [
+                "<command-message>lightrsi-clean-apply</command-message>",
+                "<command-name>/lightrsi-clean-apply</command-name>",
+                `<command-args>${PLAN} task-completed</command-args>`,
+              ].join("\n"),
+            }],
+          },
+          {
+            role: "user",
+            content: [{
+              type: "text",
+              text: [
+                "Base directory for this skill: C:\\Users\\tester\\.claude\\skills\\lightrsi-clean-apply",
+                "Schedule the exact LightRSI Cleaner task selection explicitly supplied by the user.",
+                `ARGUMENTS: ${PLAN} task-completed`,
+              ].join("\n\n"),
+            }],
+          },
+        ],
+        max_tokens: 128,
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(
+      (await readLatestClaudeSnapshotRecord(stateDir, SESSION))?.snapshot.revision,
+      REVISION,
+    );
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("scheduled Claude clean retries after upstream rejection and commits only an accepted overlay", async () => {
   const root = await mkdtemp(join(tmpdir(), "lightrsi-claude-cleaner-gateway-"));

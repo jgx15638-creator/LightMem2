@@ -127,3 +127,12 @@ test("normalizeTokenPilotCodexConfig enables real-provider compatibility learnin
     "real_provider",
   );
 });
+
+test("normalizeTokenPilotCodexConfig preserves a disabled compatibility probe", () => {
+  assert.equal(
+    normalizeTokenPilotCodexConfig({
+      contextRewrite: { providerCompatibilityProbe: "disabled" },
+    }).contextRewrite.providerCompatibilityProbe,
+    "disabled",
+  );
+});
