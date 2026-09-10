@@ -16,6 +16,7 @@ import { ensureOpenClawCleanerTaskRegistry } from "../../context-cleaner/task-re
 import { normalizeConfig } from "../../context-stack/integration/config-normalize.js";
 import type { NormalizedPluginRuntimeConfig } from "../../context-stack/integration/config-types.js";
 import { resolveSessionIdFromCommandScope } from "../../session/command-scope-map.js";
+import { renderOpenClawCleanPlan } from "./context-cleaner-renderer.js";
 import { pluginConfigRecord } from "./host-config-adapter.js";
 
 type OpenClawCleanBackend = {
@@ -117,30 +118,6 @@ function count(tokens: number | null, chars: number): string {
   return tokens === null ? `${chars} chars` : `${tokens} tok`;
 }
 
-function renderPlan(plan: ContextCleanPlan): string {
-  const lines = [
-    `Context clean plan: ${plan.planId}`,
-    `Host/session: ${plan.hostId} / ${plan.sessionId}`,
-    `Context usage: ${count(plan.usedTokens, plan.usedChars)} (${plan.tokenCountMode})`,
-    "",
-    "Selectable tasks:",
-  ];
-  if (plan.tasks.length === 0) lines.push("- (none)");
-  for (const task of plan.tasks) {
-    const marker = task.selectable ? "[ ]" : "[-]";
-    const reasons = task.reasonCodes.length > 0 ? `; ${task.reasonCodes.join(", ")}` : "";
-    lines.push(
-      `- ${marker} ${task.taskId} | ${task.lifecycleState} | ${count(task.tokenCount, task.charCount)} | ${task.recommendation}${reasons}`,
-      `  ${task.description || task.label}`,
-    );
-  }
-  lines.push(
-    "",
-    `No changes applied. To clean selected tasks: /lightrsi clean --plan ${plan.planId} --select <task-id[,task-id...]>`,
-  );
-  return lines.join("\n");
-}
-
 function renderReceipt(receipt: ContextCleanReceipt): string {
   const lines = [
     `Context clean ${receipt.status}: ${receipt.planId}`,
@@ -148,13 +125,19 @@ function renderReceipt(receipt: ContextCleanReceipt): string {
     `Estimated savings: ${count(receipt.estimatedSavedTokens, receipt.estimatedSavedChars)}`,
   ];
   if (receipt.status === "applied") {
-    lines.push(`Released: ${count(receipt.appliedSavedTokens, receipt.appliedSavedChars)}`);
+    lines.push(`Applied savings: ${count(receipt.appliedSavedTokens, receipt.appliedSavedChars)}`);
+    lines.push(`Fallback count: ${receipt.fallbackUsed ? 1 : 0}`);
+    lines.push("Apply timing: immediate.");
   } else if (receipt.status === "scheduled") {
+    lines.push(`Scheduled savings: ${count(receipt.estimatedSavedTokens, receipt.estimatedSavedChars)}`);
+    lines.push("Applied savings: not applied");
+    lines.push(`Fallback count: ${receipt.fallbackUsed ? 1 : 0}`);
     lines.push("Apply timing: next Host request.");
+  } else {
+    lines.push(`Fallback count: ${receipt.fallbackUsed ? 1 : 0}`);
   }
   if (receipt.deferredTaskIds.length > 0) lines.push(`Deferred tasks: ${receipt.deferredTaskIds.join(", ")}`);
   if (receipt.reasons.length > 0) lines.push(`Reasons: ${receipt.reasons.join(", ")}`);
-  if (receipt.fallbackUsed) lines.push("Recommendation fallback: used");
   return lines.join("\n");
 }
 
@@ -273,7 +256,7 @@ export async function handleOpenClawContextCleanCommand(params: {
     ?? resolveSessionIdFromCommandScope(params.backend.stateDir, params.ctx, params.ctx?.commandBody)
     ?? directSessionId(params.ctx);
   if (!sessionId) throw new Error("clean_session_missing; use --session <session-id>");
-  return { text: renderPlan(await params.backend.analyze(sessionId)) };
+  return { text: renderOpenClawCleanPlan(await params.backend.analyze(sessionId)) };
 }
 
 export function createOpenClawContextCleanerCommandHandler(params: {
