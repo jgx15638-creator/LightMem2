@@ -99,7 +99,12 @@ export async function applyScheduledDshClean(params: {
       const seq = parseSeq(stableId);
       if (seq === undefined || !bySeq.has(seq)) continue;
       const item = bySeq.get(seq)!;
-      targets.push({ sourceEventSeq: seq, role: item.role, stubText: `[cleaned: ${item.kind} @${seq}]` });
+      const stubText = `[cleaned: ${item.kind} @${seq}]`;
+      const eventType = item.kind === "tool_result" ? "tool/result" as const : "user/message" as const;
+      const data = eventType === "tool/result"
+        ? { message: { role: "user", content: [{ type: "tool-result", text: stubText, ...(item.callIds?.[0] ? { toolCallId: item.callIds[0] } : {}) }], source: { kind: "plugin", plugin: "tokenpilot-dsh", cleaned: true } } }
+        : { message: { role: item.role, content: [{ type: "text", text: stubText }], source: { kind: "plugin", plugin: "tokenpilot-dsh", cleaned: true } } };
+      targets.push({ sourceEventSeq: seq, eventType, data });
     }
   }
   if (targets.length === 0) return { outcome: "skipped", reasons: ["clean_no_targets"] };
