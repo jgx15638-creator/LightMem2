@@ -17,6 +17,7 @@ Current adapter responsibilities:
 - request-time reduction
 - tool-result persistence
 - canonical history rewrite and eviction
+- user-approved Context Cleaner snapshot and immediate canonical apply
 - recovery protocol and recovery tool wiring
 
 ## Install
@@ -28,7 +29,9 @@ cd /path/to/LightRSI/components/adapters/openclaw
 npm run install:release
 ```
 
-This installs the packaged TokenPilot runtime component into:
+This uses OpenClaw's managed plugin installer so the declared Context Engine
+capability is recorded and consented, then installs the packaged TokenPilot
+runtime component into:
 
 ```text
 ~/.openclaw/extensions/tokenpilot
@@ -53,6 +56,52 @@ Or use the standalone CLI:
 cd /path/to/LightRSI
 lightrsi openclaw doctor
 ```
+
+Analyze an OpenClaw session without changing its context:
+
+```bash
+lightrsi openclaw clean --session <session-id>
+```
+
+The same flow is available inside an active OpenClaw conversation through the
+plugin's native command surface:
+
+```text
+/lightrsi clean
+/lightrsi clean --session <session-id>
+```
+
+The first form resolves the current conversation's mapped TokenPilot session.
+If no mapping is available, pass the session id explicitly. Analysis never
+applies a rewrite by itself. When the task registry is missing or behind the
+canonical conversation, this explicit analysis request first classifies the
+pending turns through OpenClaw's Host-managed, tool-free model completion
+surface. Cleaner recommendations reuse that same Host-managed completion, so
+provider credentials remain inside OpenClaw's auth store. Older Hosts
+without that surface fall back to an explicitly configured `taskStateEstimator`;
+classification or recommendation failure uses the conservative shared fallback
+and does not make any additional task selectable.
+
+Apply only tasks selected from that immutable plan:
+
+```bash
+lightrsi openclaw clean --plan <plan-id> --select <task-id,...>
+```
+
+Or apply and inspect the plan from the OpenClaw conversation:
+
+```text
+/lightrsi clean --plan <plan-id> --select <task-id,...>
+/lightrsi clean --status <plan-id>
+/lightrsi clean --cancel <plan-id>
+```
+
+`/tokenpilot clean` and `/tp clean` are equivalent aliases. Active, current,
+and unresolved tasks remain protected by the canonical Cleaner validation.
+
+OpenClaw archives selected task content before atomically committing the
+canonical rewrite. Unlike scheduled Codex and Claude Code rewrites, a successful
+OpenClaw command returns an `applied` receipt immediately.
 
 Development-style install should use source build + runtime sync instead of mixing release and load-path installs. The current sanity workflow is:
 

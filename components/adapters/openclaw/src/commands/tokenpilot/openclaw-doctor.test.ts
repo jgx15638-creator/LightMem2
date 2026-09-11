@@ -14,7 +14,7 @@ function baseConfig(stateRoot: string): Record<string, unknown> {
     plugins: {
       allow: ["tokenpilot"],
       slots: {
-        contextEngine: "layered-context",
+        contextEngine: "tokenpilot",
       },
       entries: {
         tokenpilot: {
@@ -57,7 +57,7 @@ test("inspectOpenClawDoctor passes when release install invariants are present",
     const report = inspectOpenClawDoctor(baseConfig(join(root, ".openclaw")));
     assert.equal(report.ok, true);
     assert.equal(report.checks.every((check) => check.ok), true);
-    assert.match(formatOpenClawDoctorReport(report), /plugins\.slots\.contextEngine: layered-context/);
+    assert.match(formatOpenClawDoctorReport(report), /plugins\.slots\.contextEngine: tokenpilot/);
     assert.doesNotMatch(formatOpenClawDoctorReport(report), /Suggested fixes:/);
   } finally {
     delete process.env.OPENCLAW_STATE_DIR;
@@ -84,7 +84,7 @@ test("inspectOpenClawDoctor accepts a legacy state dir when the canonical dir ha
       plugins: {
         allow: ["tokenpilot"],
         slots: {
-          contextEngine: "layered-context",
+          contextEngine: "tokenpilot",
         },
         entries: {
           tokenpilot: {

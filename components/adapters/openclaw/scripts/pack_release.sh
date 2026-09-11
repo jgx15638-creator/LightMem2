@@ -3,15 +3,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PNPM_CMD=(pnpm)
+BUILD_CMD=(npm run build)
 if command -v node.exe >/dev/null 2>&1 && command -v cmd.exe >/dev/null 2>&1; then
-  PNPM_CMD=(cmd.exe /d /c pnpm)
+  # A repository mounted into WSL may have dependencies installed by Windows.
+  # Use the matching Windows Node toolchain without depending on a globally
+  # selected pnpm version; this package's build has no workspace orchestration.
+  BUILD_CMD=(cmd.exe /d /c npm run build)
 fi
 
 cd "${PLUGIN_DIR}"
 
 rm -f lightrsi-openclaw-adapter-*.tgz lightrsi-tokenpilot-openclaw-*.tgz tokenpilot-*.tgz
-"${PNPM_CMD[@]}" build >/dev/null 2>&1
+# install_release.sh captures stdout from this script as the archive path.
+# Keep build diagnostics visible on stderr while reserving stdout for the
+# final .tgz path printed below.
+"${BUILD_CMD[@]}" >&2
 
 PACK_TMP_DIR="$(mktemp -d "${PLUGIN_DIR}/.tokenpilot-pack-XXXXXX")"
 cleanup() {
@@ -20,6 +26,15 @@ cleanup() {
 trap cleanup EXIT
 
 NPM_CACHE_DIR="${NPM_CACHE_DIR:-${PACK_TMP_DIR}/npm-cache}"
+if command -v wslpath >/dev/null 2>&1; then
+  case "${NPM_CACHE_DIR}" in
+    [A-Za-z]:[\\/]*) NPM_CACHE_DIR="$(wslpath -u "${NPM_CACHE_DIR}")" ;;
+  esac
+elif command -v cygpath >/dev/null 2>&1; then
+  case "${NPM_CACHE_DIR}" in
+    [A-Za-z]:[\\/]*) NPM_CACHE_DIR="$(cygpath -u "${NPM_CACHE_DIR}")" ;;
+  esac
+fi
 if [[ "${NPM_CACHE_DIR}" == /* ]]; then
   mkdir -p "${NPM_CACHE_DIR}"
 fi
