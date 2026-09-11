@@ -151,6 +151,7 @@ function itemIdentity(params: {
   turnOrdinal: number;
   phase: "input" | "output";
   itemOrdinal: number;
+  syntheticOccurrences: Map<string, number>;
 }): string {
   const type = typeof params.item.type === "string"
     ? params.item.type
@@ -159,14 +160,15 @@ function itemIdentity(params: {
       : "item";
   if (typeof params.item.id === "string") return `${type}:id:${params.item.id}`;
   if (typeof params.item.call_id === "string") return `${type}:call:${params.item.call_id}`;
-  return `${type}:synthetic:${hashJson({
-    sessionId: params.sessionId,
-    type,
-    turnOrdinal: params.turnOrdinal,
-    phase: params.phase,
-    itemOrdinal: params.itemOrdinal,
-    item: params.item,
-  })}`;
+  // Stateless replay sends prior items again in a later request. Synthetic
+  // identities therefore follow content plus its ordered occurrence in the
+  // effective payload, rather than the request that happened to carry it.
+  const baseNativeId = `${type}:synthetic:${hashJson(params.item)}`;
+  const occurrence = params.syntheticOccurrences.get(baseNativeId) ?? 0;
+  params.syntheticOccurrences.set(baseNativeId, occurrence + 1);
+  return occurrence === 0
+    ? baseNativeId
+    : `${baseNativeId}:occurrence:${occurrence}`;
 }
 
 function appendEffectiveItem(params: {
@@ -180,6 +182,7 @@ function appendEffectiveItem(params: {
   observationOnlyItems: CodexEffectiveHistoryItem[];
   deferredItems: CodexEffectiveHistoryItem[];
   effectiveItemRecords?: EffectiveItemRecord[];
+  syntheticOccurrences: Map<string, number>;
 }): string | undefined {
   const nativeId = itemIdentity(params);
   if (params.seen.has(nativeId)) return undefined;
@@ -204,11 +207,22 @@ function appendEffectiveItem(params: {
 function turnAttributionKey(item: JsonObject): string {
   const normalized = cloneJson(item);
   delete normalized.id;
+  delete normalized.internal_chat_message_metadata_passthrough;
   if (!["program_output", "tool_search_call", "tool_search_output"].includes(
     String(normalized.type ?? "").toLowerCase(),
   )) delete normalized.status;
   delete normalized.created_at;
-  return hashJson(normalized);
+  return hashJson(canonicalizeTurnAttributionValue(normalized));
+}
+
+function canonicalizeTurnAttributionValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeTurnAttributionValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as JsonObject)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalizeTurnAttributionValue(child)]),
+  );
 }
 
 function buildAttributedTurns(params: {
@@ -373,6 +387,42 @@ function unresolvedCallIds(items: CodexEffectiveHistoryItem[]): string[] {
     if (ref.side === "output" && ref.callId) outputs.add(ref.callId);
   }
   return Array.from(calls).filter((callId) => !outputs.has(callId)).sort();
+}
+
+const CURRENT_INPUT_CLOSURE_REASON_CODES = new Set<CodexEffectiveHistoryReasonCode>([
+  "journal_current_request_uncommitted",
+  "history_replay_incomplete",
+  "history_unresolved_tool_calls",
+]);
+
+/**
+ * Treats a committed tool call as closed only for the request that carries its
+ * matching output. The current input remains outside the history snapshot and
+ * is appended by the rebase builder, so the history revision stays stable.
+ */
+export function resolveCodexEffectiveHistoryCurrentInputClosures(params: {
+  view: CodexEffectiveHistoryView;
+  currentInput: unknown;
+}): CodexEffectiveHistory {
+  const { history } = params.view;
+  if (!history.incomplete || history.unresolvedCallIds.length === 0) return history;
+  if (!params.view.reasonCodes.includes("history_unresolved_tool_calls")) return history;
+  if (params.view.reasonCodes.some((reason) => !CURRENT_INPUT_CLOSURE_REASON_CODES.has(reason))) {
+    return history;
+  }
+  const outputCallIds = new Set(
+    (Array.isArray(params.currentInput) ? params.currentInput : [])
+      .filter((item): item is JsonObject => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+      .map(codexReplayPairRef)
+      .filter((ref) => ref.side === "output" && ref.callId)
+      .map((ref) => ref.callId!),
+  );
+  if (!history.unresolvedCallIds.every((callId) => outputCallIds.has(callId))) return history;
+  return {
+    ...history,
+    unresolvedCallIds: [],
+    incomplete: false,
+  };
 }
 
 function hasUncommittedActiveWork(params: {
@@ -644,7 +694,12 @@ export async function buildCodexEffectiveHistoryView(
   const deferredItems: CodexEffectiveHistoryItem[] = [];
   const effectiveItemRecords: EffectiveItemRecord[] = [];
   const seen = new Set<string>();
+  let syntheticOccurrences = new Map<string, number>();
   for (const turn of committedChain.chain) {
+    const carriesCommittedReplay = Array.isArray(turn.request.entry.committedInputItems);
+    const turnSyntheticOccurrences = carriesCommittedReplay
+      ? new Map<string, number>()
+      : syntheticOccurrences;
     committedInputItems(turn).forEach((item, itemOrdinal) => {
       appendEffectiveItem({
         item,
@@ -657,6 +712,7 @@ export async function buildCodexEffectiveHistoryView(
         observationOnlyItems,
         deferredItems,
         effectiveItemRecords,
+        syntheticOccurrences: turnSyntheticOccurrences,
       });
     });
     turn.response.entry.outputItems.forEach((item, itemOrdinal) => {
@@ -671,8 +727,10 @@ export async function buildCodexEffectiveHistoryView(
         observationOnlyItems,
         deferredItems,
         effectiveItemRecords,
+        syntheticOccurrences: turnSyntheticOccurrences,
       });
     });
+    syntheticOccurrences = turnSyntheticOccurrences;
   }
   const attribution = buildAttributedTurns({
     chain: semanticChain.chain,

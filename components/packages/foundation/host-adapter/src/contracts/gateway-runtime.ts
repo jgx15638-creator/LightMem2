@@ -25,6 +25,7 @@ export type HostGatewayRawRequest = {
   body?: string | Uint8Array;
   inboundAuthorization?: string;
   inboundHeaders?: Record<string, string | string[] | undefined>;
+  preserveContentEncoding?: boolean;
   signal?: AbortSignal;
 };
 

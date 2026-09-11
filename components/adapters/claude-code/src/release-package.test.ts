@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import test from "node:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -14,51 +14,12 @@ const tarCommand = process.platform === "win32"
   : "tar";
 
 async function packRelease(): Promise<string> {
-  if (process.platform !== "win32") {
-    const result = await execFileAsync("bash", ["scripts/pack_release.sh"], { cwd: packageDir });
-    const archiveName = result.stdout.trim().split("\n").at(-1)?.split(/[\\/]/).at(-1) ?? "";
-    if (!archiveName) throw new Error("pack_release.sh produced no archive");
-    return join(packageDir, archiveName);
-  }
-  const scriptName = `.pack-release-${process.pid}.sh`;
-  const scriptPath = join(packageDir, "scripts", scriptName);
-  const shimName = `.pack-bin-${process.pid}`;
-  const shimDir = join(packageDir, "scripts", shimName);
-  const packRoot = await mkdtemp(join(tmpdir(), `lightrsi-claude-code-pack-${process.pid}-`));
-  const posixPackRoot = (await execFileAsync("bash", ["-lc", "pwd"], { cwd: packRoot })).stdout.trim();
-  const pnpmCjs = join(process.env.APPDATA ?? "", "npm", "node_modules", "pnpm", "bin", "pnpm.cjs");
-  const packScript = (await readFile(join(packageDir, "scripts", "pack_release.sh"), "utf8"))
-    .replaceAll("\r\n", "\n")
-    .replace(/mktemp -d \/tmp\/lightrsi-[^\s)]+/, `mktemp -d ${posixPackRoot}/pack-XXXXXX`);
-  const nodeShim = `#!/bin/bash
-args=()
-for arg in "$@"; do
-  case "$arg" in
-    /mnt/[A-Za-z]/*|/[A-Za-z]/*) arg="$(printf '%s' "$arg" | sed -E 's#^/(mnt/)?([A-Za-z])/#\\2:/#')" ;;
-  esac
-  args+=("$arg")
-done
-exec node.exe "\${args[@]}"
-`;
-  await writeFile(scriptPath, packScript, "utf8");
-  await mkdir(shimDir, { recursive: true });
-  await writeFile(join(shimDir, "node"), nodeShim, "utf8");
-  await writeFile(join(shimDir, "pnpm"), nodeShim.replace('exec node.exe "${args[@]}"', `exec node.exe '${pnpmCjs}' "\${args[@]}"`), "utf8");
-  await chmod(join(shimDir, "node"), 0o755);
-  await chmod(join(shimDir, "pnpm"), 0o755);
-  try {
-    const result = await execFileAsync("bash", [
-      "-lc",
-      `PATH="$(pwd)/scripts/${shimName}:$PATH" bash scripts/${scriptName}`,
-    ], { cwd: packageDir });
-    const archiveName = result.stdout.trim().split("\n").at(-1)?.split(/[\\/]/).at(-1) ?? "";
-    if (!archiveName) throw new Error("pack_release.sh produced no archive");
-    return join(packageDir, archiveName);
-  } finally {
-    await rm(shimDir, { recursive: true, force: true });
-    await rm(scriptPath, { force: true });
-    await rm(packRoot, { recursive: true, force: true });
-  }
+  const result = process.platform === "win32"
+    ? await execFileAsync(process.execPath, ["scripts/pack-release.mjs"], { cwd: packageDir })
+    : await execFileAsync("bash", ["scripts/pack_release.sh"], { cwd: packageDir });
+  const archiveName = result.stdout.trim().split(/\r?\n/u).at(-1)?.split(/[\\/]/u).at(-1) ?? "";
+  if (!archiveName) throw new Error("release packer produced no archive");
+  return join(packageDir, archiveName);
 }
 
 test("packaged Claude codec preserves structured systems and native cache control", async () => {
@@ -83,6 +44,12 @@ test("packaged Claude codec preserves structured systems and native cache contro
     assert.deepEqual(encoded.cache_control, { type: "ephemeral" });
     assert.equal("prompt_cache_key" in encoded, false);
     assert.deepEqual(encoded.messages, raw.messages);
+    await execFileAsync(process.execPath, [
+      resolve(packageDir, "../../..", "scripts", "release", "smoke-host-package.mjs"),
+      archivePath,
+      "claude-code",
+      manifest.version,
+    ], { timeout: 60_000 });
   } finally {
     if (archivePath) await rm(archivePath, { force: true });
     await rm(extractDir, { recursive: true, force: true });

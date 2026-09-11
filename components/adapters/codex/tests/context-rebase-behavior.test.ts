@@ -356,6 +356,68 @@ test("CDR-01 rejects malformed, duplicate, and protocol-mismatched tool closure"
   ], /tool_output_before_call:reversed/);
 });
 
+test("CDR-01 deduplicates identical current tool output and rejects conflicts", () => {
+  const callId = "call-current-output-overlap";
+  const effectiveHistory: CodexEffectiveHistory = {
+    ...effectiveHistoryFixture(),
+    replayableItems: [
+      {
+        stableItemId: "custom-call-overlap",
+        nativeId: "ctc-overlap",
+        item: {
+          id: "ctc-server",
+          type: "custom_tool_call",
+          call_id: callId,
+          name: "computer",
+          input: "inspect the current window",
+        },
+      },
+      {
+        stableItemId: "custom-output-overlap",
+        nativeId: "ctco-overlap",
+        item: {
+          id: "ctco-history",
+          type: "custom_tool_call_output",
+          call_id: callId,
+          output: "tool result",
+          status: "completed",
+          created_at: 1_700_000_000,
+        },
+      },
+    ],
+  };
+  const build = (output: string) => {
+    const currentInput: JsonObject[] = [{
+      id: "ctco-current",
+      type: "custom_tool_call_output",
+      call_id: callId,
+      output,
+    }];
+    return buildCodexRebaseRequest({
+      sessionId: "codex-session-current-output-overlap",
+      planId: "provider-continuation-replay",
+      baseRevision: effectiveHistory.revision,
+      originalPayload: { ...baseResponsesPayload(), input: currentInput },
+      effectiveHistory,
+      currentInput,
+      mutationPlan: { operations: [] },
+    });
+  };
+
+  const result = build("tool result");
+  const replayedItems = result.payload.input as JsonObject[];
+  assert.equal("previous_response_id" in result.payload, false);
+  assert.equal(
+    replayedItems.filter((item) => item.type === "custom_tool_call_output" && item.call_id === callId).length,
+    1,
+  );
+  assert.equal(
+    replayedItems.find((item) => item.type === "custom_tool_call_output" && item.call_id === callId)?.id,
+    "ctco-current",
+  );
+  assert.throws(() => build("different current result"), new RegExp(`tool_output_duplicate:${callId}`));
+});
+
 test("CDR-01 replays PTC program state and caller links exactly", () => {
   const caller = { type: "program", caller_id: "call-program-1" };
   const effectiveHistory: CodexEffectiveHistory = {

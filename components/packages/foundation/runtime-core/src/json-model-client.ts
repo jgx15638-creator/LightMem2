@@ -20,15 +20,24 @@ export type JsonModelClient = {
 
 const CHAT_FALLBACK_STATUSES = new Set([400, 404, 405, 415, 422, 501]);
 
+function extractTextValue(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (!value || typeof value !== "object") return "";
+  const nested = (value as { value?: unknown }).value;
+  return typeof nested === "string" ? nested.trim() : "";
+}
+
 function extractResponsesText(payload: any): string {
   const texts: string[] = [];
   for (const item of Array.isArray(payload?.output) ? payload.output : []) {
     for (const part of Array.isArray(item?.content) ? item.content : []) {
-      if (typeof part?.text === "string" && part.text.trim()) texts.push(part.text.trim());
+      const text = extractTextValue(part?.text);
+      if (text) texts.push(text);
     }
   }
   if (texts.length > 0) return texts.join("\n");
-  return typeof payload?.output_text === "string" ? payload.output_text.trim() : "";
+  const outputText = extractTextValue(payload?.output_text);
+  return outputText || extractChatText(payload);
 }
 
 function extractChatText(payload: any): string {
@@ -36,7 +45,7 @@ function extractChatText(payload: any): string {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   return content
-    .map((part: any) => typeof part?.text === "string" ? part.text.trim() : "")
+    .map((part: any) => extractTextValue(part?.text))
     .filter(Boolean)
     .join("\n");
 }

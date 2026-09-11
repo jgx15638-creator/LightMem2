@@ -296,6 +296,39 @@ test("Codex cleaner bridge does not schedule a non-scheduled control-plane recei
   });
 });
 
+test("Codex cleaner bridge preserves conservative recommendation fallback through scheduling", async () => {
+  await withTempState(async (stateDir) => {
+    const bridge = createCodexContextCleanerBridge({
+      stateDir,
+      controlPlane: {
+        ...fakeControlPlane(),
+        async executeApprovedClean() {
+          return { ...pendingReceipt("scheduled"), fallbackUsed: true };
+        },
+      },
+    });
+    const receipt = await bridge.executeApprovedClean({
+      schemaVersion: CONTEXT_CLEAN_SCHEMA_VERSION,
+      cleanPlanId: "clean-plan-1",
+      hostId: "codex",
+      sessionId: "codex-cleaner-session",
+      baseRevision: "revision-before",
+      approvedAt: "2026-08-21T00:00:00.000Z",
+      selectedTasks: [{
+        taskId: "task-1",
+        itemIds: ["item-1"],
+        itemDigests: { "item-1": "digest-1" },
+      }],
+    });
+    assert.equal(receipt.status, "scheduled");
+    assert.equal(receipt.fallbackUsed, true);
+    assert.equal((await readCodexCleanerSchedule({
+      stateDir,
+      sessionId: "codex-cleaner-session",
+    })).outcome, "ready");
+  });
+});
+
 test("Codex cleaner bridge lists persisted sessions and reads canonical effective history", async () => {
   const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-bridge-"));
   try {
@@ -411,6 +444,78 @@ test("Codex cleaner bridge rejects a session whose committed response chain is i
       bridge.readCleanSnapshot(sessionId),
       /codex_clean_snapshot_incomplete/,
     );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex cleaner bridge excludes its own active escaped exec-wrapper chain", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-self-call-"));
+  try {
+    const sessionId = "codex-cleaner-self-call";
+    const codexSessionId = "codex-host-self-call";
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      payload: { input: [{ role: "user", content: "finished task" }] },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      observedAt: "2026-08-20T00:00:00.000Z",
+      response: {
+        id: "response-1",
+        output: [{ type: "message", role: "assistant", content: "done" }],
+      },
+      status: "completed",
+    });
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-2",
+      payload: {
+        previous_response_id: "response-1",
+        input: [{ role: "user", content: "$lightrsi-clean" }],
+      },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-2",
+      response: {
+        id: "response-2",
+        previous_response_id: "response-1",
+        output: [{
+          type: "custom_tool_call",
+          call_id: "call-clean",
+          name: "exec",
+          input: String.raw`const result = await tools.exec_command({
+  cmd: "node \\"C:\\\\LightRSI\\\\package\\\\dist\\\\lightrsi.js\\" \\"codex\\" \\"clean\\"",
+  workdir: "C:\\workspace",
+});`,
+        }],
+      },
+      status: "completed",
+    });
+    await upsertCodexSessionSnapshot(stateDir, sessionId, {
+      codexSessionId,
+      latestResponseId: "response-2",
+      latestModel: "gpt-5.4",
+    });
+
+    const snapshot = await createCodexContextCleanerBridge({
+      stateDir,
+      controlPlane: fakeControlPlane(),
+      currentCodexSessionId: codexSessionId,
+    }).readCleanSnapshot(sessionId);
+
+    assert.equal(snapshot.items.some((item) => item.kind === "tool_call"), false);
+    assert.equal(JSON.stringify(snapshot.items).includes("lightrsi-clean"), false);
+    assert.equal(snapshot.capturedAt, "2026-08-20T00:00:00.000Z");
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }

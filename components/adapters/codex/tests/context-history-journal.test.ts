@@ -7,6 +7,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
+  acquireCodexContextHistoryJournalLock,
   appendCodexRequestJournalEntry,
   appendCodexResponseJournalEntry,
   buildCodexEffectiveHistory,
@@ -355,6 +356,129 @@ test("CDH-01 serializes concurrent retries inside one request read-modify-append
     assert.equal(journal.entries.length, 1);
     assert.equal(new Set(entries.map((entry) => entry.requestId)).size, 1);
     assert.equal(journal.entries[0]?.kind, "request");
+  });
+});
+
+test("CDH-01 waits for a held journal lock when the wall clock jumps forward", async () => {
+  await withTempState(async (stateDir) => {
+    const sessionId = "codex-session-monotonic-lock";
+    const firstLock = await acquireCodexContextHistoryJournalLock({
+      stateDir,
+      sessionId,
+      timeoutMs: 500,
+      retryMs: 10,
+    });
+    const originalDateNow = Date.now;
+    let dateNowCall = 0;
+    Object.defineProperty(Date, "now", {
+      configurable: true,
+      value: () => {
+        dateNowCall += 1;
+        return dateNowCall === 1 ? 1_000 : 12_000;
+      },
+    });
+
+    try {
+      const waitingLock = acquireCodexContextHistoryJournalLock({
+        stateDir,
+        sessionId,
+        timeoutMs: 500,
+        retryMs: 10,
+      });
+      void waitingLock.catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await firstLock.release();
+      const secondLock = await waitingLock;
+      await secondLock.release();
+    } finally {
+      Object.defineProperty(Date, "now", { configurable: true, value: originalDateNow });
+      await firstLock.release();
+    }
+  });
+});
+
+test("CDH-01 lock timeout reports the active owner and recovery-lock state", async () => {
+  await withTempState(async (stateDir) => {
+    const sessionId = "codex-session-lock-diagnostic";
+    const heldLock = await acquireCodexContextHistoryJournalLock({ stateDir, sessionId });
+    try {
+      await assert.rejects(
+        acquireCodexContextHistoryJournalLock({
+          stateDir,
+          sessionId,
+          timeoutMs: 25,
+          retryMs: 5,
+        }),
+        (error: Error) => {
+          assert.match(error.message, new RegExp(`session ${sessionId}`));
+          assert.match(error.message, new RegExp(`ownerPid=${process.pid}`));
+          assert.match(error.message, /ownerAlive=true/);
+          assert.match(error.message, /finalRecovery=missing/);
+          return true;
+        },
+      );
+    } finally {
+      await heldLock.release();
+    }
+
+    const lockPath = codexContextHistoryJournalLockPath(stateDir, sessionId);
+    const recoveryPath = `${lockPath}.recovery`;
+    await writeFile(recoveryPath, JSON.stringify({
+      token: "active-recovery-owner",
+      pid: process.pid,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+    }), "utf8");
+    try {
+      await assert.rejects(
+        acquireCodexContextHistoryJournalLock({
+          stateDir,
+          sessionId,
+          timeoutMs: 25,
+          retryMs: 5,
+        }),
+        (error: Error) => {
+          assert.match(error.message, /finalLock=missing/);
+          assert.match(error.message, /finalRecovery=present/);
+          assert.match(error.message, new RegExp(`ownerPid=${process.pid}`));
+          assert.match(error.message, /ownerAlive=true/);
+          return true;
+        },
+      );
+    } finally {
+      await rm(recoveryPath, { force: true });
+    }
+  });
+});
+
+test("CDH-01 recovers after a recovery-lock owner exits unexpectedly", async () => {
+  await withTempState(async (stateDir) => {
+    const sessionId = "codex-session-crashed-recovery-owner";
+    const lockPath = codexContextHistoryJournalLockPath(stateDir, sessionId);
+    const recoveryPath = `${lockPath}.recovery`;
+    await mkdir(dirname(lockPath), { recursive: true });
+    const crashedPid = 2_147_483_647;
+    const owner = {
+      token: "crashed-owner",
+      pid: crashedPid,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+    };
+    await writeFile(lockPath, JSON.stringify(owner), "utf8");
+    await writeFile(recoveryPath, JSON.stringify(owner), "utf8");
+    const recoveryOwner = JSON.parse(await readFile(recoveryPath, "utf8")) as { pid: number };
+    assert.equal(recoveryOwner.pid, crashedPid);
+
+    const recoveredLock = await acquireCodexContextHistoryJournalLock({
+      stateDir,
+      sessionId,
+      timeoutMs: 500,
+      retryMs: 5,
+    });
+    await recoveredLock.release();
+
+    await assert.rejects(stat(lockPath), { code: "ENOENT" });
+    await assert.rejects(stat(recoveryPath), { code: "ENOENT" });
   });
 });
 

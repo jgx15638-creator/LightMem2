@@ -31,7 +31,7 @@ import { processCodexHookEvent } from "../src/hooks-handler.js";
 import { createConsoleLogger } from "../src/logger.js";
 import { startCodexResponsesProxy } from "../src/proxy-runtime.js";
 
-test("Codex host e2e wires install, proxy reduction, report/visual, and MCP recovery together", async () => {
+test("Codex host e2e wires install, proxy reduction, report/visual, and MCP recovery together", async (t) => {
   await withTempHome("lightrsi-codex-e2e-", async (homeDir) => {
     const proxyPort = await reserveUnusedPort();
     const stateDir = join(homeDir, ".codex", "tokenpilot-state", "tokenpilot");
@@ -54,6 +54,10 @@ test("Codex host e2e wires install, proxy reduction, report/visual, and MCP reco
         ],
       },
     });
+    t.after(async () => {
+      await runtime?.close();
+      await upstream.close();
+    });
 
     await mkdir(join(homeDir, ".codex"), { recursive: true });
     await writeTokenPilotCodexConfig(
@@ -61,6 +65,12 @@ test("Codex host e2e wires install, proxy reduction, report/visual, and MCP reco
         proxyPort,
         stateDir,
         upstreamProvider: "OpenAI",
+        upstream: {
+          name: "OpenAI",
+          baseUrl: upstream.baseUrl,
+          wireApi: "responses",
+          requiresOpenAIAuth: true,
+        },
         ux: {
           details: true,
         } as any,
@@ -269,8 +279,6 @@ test("Codex host e2e wires install, proxy reduction, report/visual, and MCP reco
     assert.equal(Array.isArray(cacheAuditLines[0]?.entropyFindings), true);
     assert.equal(Array.isArray(cacheAuditLines[0]?.driftReasons), true);
 
-    await runtime?.close();
-    await upstream.close();
   });
 });
 

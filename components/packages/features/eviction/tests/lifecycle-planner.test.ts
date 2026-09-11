@@ -199,12 +199,28 @@ test("estimator failures, invalid output, and stale versions fail open", async (
   }));
 
   assert.deepEqual(failed.reasonCodes, ["estimator_failed"]);
+  assert.equal(failed.estimatorFailureCode, "unknown");
+  assert.equal(typeof failed.estimatorFailureDurationMs, "number");
   assert.deepEqual(invalid.reasonCodes, ["estimator_output_invalid"]);
   assert.deepEqual(invalidNested.reasonCodes, ["estimator_output_invalid"]);
   assert.deepEqual(stale.reasonCodes, ["base_version_mismatch"]);
   assert.equal(failed.plan, undefined);
   assert.equal(invalid.registryUpdateRequired, false);
   assert.equal(stale.registry.version, 4);
+});
+
+test("estimator failure diagnostics expose only a bounded category", async () => {
+  const failed = await planLifecycleEviction(input({
+    estimator: {
+      estimate: async () => {
+        throw new Error("responses_api_failed:502");
+      },
+    },
+  }));
+
+  assert.equal(failed.estimatorFailureCode, "responses_http_502");
+  assert.equal(typeof failed.estimatorFailureDurationMs, "number");
+  assert.doesNotMatch(JSON.stringify(failed), /provider|secret|body/i);
 });
 
 test("estimator cannot claim turn ownership outside the delta", async () => {

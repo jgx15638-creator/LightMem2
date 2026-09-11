@@ -289,3 +289,30 @@ test("tool call attribution fails closed when a call id appears in multiple turn
     "sess-map:t1",
   );
 });
+
+test("internal Claude metadata requests do not advance or invoke the semantic estimator", async () => {
+  const stateDir = await tempStateDir();
+  const sessionId = "sess-internal-request";
+  let updateCalls = 0;
+
+  const result = await runSemanticPipeline({
+    stateDir,
+    sessionId,
+    messages: [{
+      role: "user",
+      content: "[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]",
+    }],
+    estimator: fakeEstimator,
+    updateRegistryFromDelta: async ({ registry }) => {
+      updateCalls += 1;
+      return { registry, changed: false };
+    },
+  });
+
+  assert.equal(result.ran, true);
+  assert.equal(result.changed, false);
+  assert.equal(result.note, "internal_request_ignored");
+  assert.equal(updateCalls, 0);
+  assert.equal((await loadSessionTaskRegistry(stateDir, sessionId)).lastProcessedTurnSeq, 0);
+  assert.equal(await loadRawSemanticTurnRecord(stateDir, sessionId, 1), null);
+});

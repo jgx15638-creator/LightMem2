@@ -382,6 +382,8 @@ test("lifecycle runner leaves the registry unchanged on estimator failure", asyn
   assert.equal(result.attemptedEstimator, true);
   assert.equal(result.registryPersisted, false);
   assert.equal(result.preparedPlan, undefined);
+  assert.equal(result.estimatorFailureCode, "unknown");
+  assert.equal(typeof result.estimatorFailureDurationMs, "number");
   assert.equal((await loadSessionTaskRegistry(stateDir, SESSION_ID)).version, 0);
   assert.doesNotMatch(JSON.stringify(result), /private upstream error/);
 

@@ -138,24 +138,188 @@ test("task-state estimator leaves null provider cost unknown", async () => {
   }
 });
 
-test("task-state estimator accepts a Host-managed JSON model client without provider secrets", async () => {
-  let systemPrompt = "";
-  let userPayload = "";
-  const estimator = createApiTaskStateEstimator(
-    { lifecycleMode: "coupled", evidenceMode: "three_state" },
-    () => ({
-      async request(input) {
-        systemPrompt = input.systemPrompt;
-        userPayload = input.userPayload;
-        return {
-          text: JSON.stringify({ baseVersion: 1, taskUpdates: [] }),
-        };
-      },
-    }),
-  );
+test("task-state estimator accepts a fenced JSON object from compatible providers", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        output: [{
+          type: "message",
+          content: [{
+            type: "output_text",
+            text: "```json\n{\"baseVersion\":1,\"taskUpdates\":[]}\n```",
+          }],
+        }],
+      };
+    },
+  } as Response);
+  try {
+    const estimator = createApiTaskStateEstimator({
+      baseUrl: "https://example.test/v1",
+      apiKey: "test-key",
+      model: "test-model",
+    });
+    assert.deepEqual(await estimator.estimate(estimatorInput), {
+      baseVersion: 1,
+      taskUpdates: [],
+      usage: undefined,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
-  const output = await estimator.estimate(estimatorInput);
-  assert.deepEqual(output, { baseVersion: 1, taskUpdates: [], usage: undefined });
-  assert.match(systemPrompt, /task-state estimator/);
-  assert.equal(JSON.parse(userPayload).registry.version, 1);
+test("task-state estimator normalizes common compatible-provider task update aliases", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        output_text: JSON.stringify({
+          base_version: 7,
+          task_updates: [{
+            task_id: "session-1:t2-task",
+            title: "Validate event-search index migration",
+            description: "Benchmark and validate the event-search index migration",
+            status: "complete",
+            covered_turn_abs_ids: ["session-1:t2"],
+            completion_evidence: "TASK_B_COMPLETE",
+          }],
+        }),
+      };
+    },
+  } as Response);
+  try {
+    const estimator = createApiTaskStateEstimator({
+      baseUrl: "https://example.test/v1",
+      apiKey: "test-key",
+      model: "test-model",
+    });
+    const output = await estimator.estimate({
+      registry: {
+        ...estimatorInput.registry,
+        version: 7,
+        sessionId: "session-1",
+      },
+      delta: {
+        ...estimatorInput.delta,
+        fromTurnSeqExclusive: 1,
+        toTurnSeqInclusive: 2,
+        coveredTurnAbsIds: ["session-1:t2"],
+        messages: [{
+          anchor: { sessionId: "session-1", turnAbsId: "session-1:t2", turnSeq: 2, role: "user" },
+          role: "user",
+          text: "Validate the event-search index migration.",
+          source: "raw",
+        }],
+      },
+    } as any);
+
+    assert.deepEqual(output, {
+      baseVersion: 7,
+      taskUpdates: [{
+        taskId: "session-1:t2-task",
+        title: "Validate event-search index migration",
+        objective: "Benchmark and validate the event-search index migration",
+        lifecycle: "completed",
+        coveredTurnAbsIds: ["session-1:t2"],
+        completionEvidence: ["TASK_B_COMPLETE"],
+      }],
+      usage: undefined,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("task-state estimator removes out-of-window ownership while preserving current turns", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        output_text: JSON.stringify({
+          baseVersion: 1,
+          taskUpdates: [{
+            taskId: "session-1:t2-task",
+            objective: "Validate the current task",
+            lifecycle: "active",
+            coveredTurnAbsIds: ["session-1:t1", "session-1:t2"],
+          }],
+        }),
+      };
+    },
+  } as Response);
+  try {
+    const estimator = createApiTaskStateEstimator({
+      baseUrl: "https://example.test/v1",
+      apiKey: "test-key",
+      model: "test-model",
+    });
+    const output = await estimator.estimate({
+      registry: {
+        ...estimatorInput.registry,
+        sessionId: "session-1",
+      },
+      delta: {
+        ...estimatorInput.delta,
+        fromTurnSeqExclusive: 1,
+        toTurnSeqInclusive: 2,
+        coveredTurnAbsIds: ["session-1:t2"],
+      },
+    } as any);
+
+    assert.deepEqual(output.taskUpdates[0]?.coveredTurnAbsIds, ["session-1:t2"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("task-state estimator derives a missing new-task objective from its covered user turn", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        output_text: JSON.stringify({
+          baseVersion: 1,
+          taskUpdates: [{
+            taskId: "session-1:t2-task",
+            lifecycle: "active",
+            coveredTurnAbsIds: ["session-1:t2"],
+          }],
+        }),
+      };
+    },
+  } as Response);
+  try {
+    const estimator = createApiTaskStateEstimator({
+      baseUrl: "https://example.test/v1",
+      apiKey: "test-key",
+      model: "test-model",
+    });
+    const output = await estimator.estimate({
+      registry: {
+        ...estimatorInput.registry,
+        sessionId: "session-1",
+      },
+      delta: {
+        ...estimatorInput.delta,
+        fromTurnSeqExclusive: 1,
+        toTurnSeqInclusive: 2,
+        coveredTurnAbsIds: ["session-1:t2"],
+        messages: [{
+          anchor: { sessionId: "session-1", turnAbsId: "session-1:t2", turnSeq: 2, role: "user" },
+          role: "user",
+          text: "Diagnose the OAuth refresh failure.",
+          source: "raw",
+        }],
+      },
+    } as any);
+
+    assert.equal(output.taskUpdates[0]?.objective, "Diagnose the OAuth refresh failure.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

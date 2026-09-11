@@ -18,8 +18,11 @@ import {
 } from "../src/index.js";
 import { samplePlan, sampleReceipt, sampleSnapshot } from "./fixtures.js";
 
-async function saveScheduledPlan(stateDir: string): Promise<void> {
-  await saveContextCleanPlan({ stateDir, plan: samplePlan() });
+async function saveScheduledPlan(
+  stateDir: string,
+  plan = samplePlan(),
+): Promise<void> {
+  await saveContextCleanPlan({ stateDir, plan });
   await transitionContextCleanState({
     stateDir,
     receipt: sampleReceipt("approved"),
@@ -298,6 +301,96 @@ test("revision, digest, lifecycle, and task attribution drift preserve the Host 
 
     const noLongerEvictable = await prepareWith({ evictableTaskIds: [] });
     assert.deepEqual(noLongerEvictable.reasons, ["clean_execution_task_not_evictable"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unrelated history drift relocates a frozen selection without expanding its scope", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lightrsi-clean-execution-unrelated-drift-"));
+  try {
+    const baseline = sampleSnapshot();
+    await saveScheduledPlan(root, {
+      ...samplePlan(),
+      snapshotItems: baseline.items.map((item) => ({
+        stableId: item.stableId,
+        fingerprint: item.fingerprint,
+      })),
+    });
+    const current = sampleSnapshot("rev-2");
+    current.items[2] = { ...current.items[2]!, fingerprint: "changed-unselected-item" };
+    current.items.push({
+      stableId: "item-cleaner-control",
+      kind: "assistant",
+      taskIds: ["task-current"],
+      fingerprint: "digest-cleaner-control",
+      chars: 48,
+    });
+    const bridge = createContextCleanerHostExecutionBridge({
+      stateDir: root,
+      hostId: "codex",
+      async readExecutionSnapshot() {
+        return {
+          snapshot: current,
+          activeTaskIds: ["task-current"],
+          evictableTaskIds: ["task-a"],
+        };
+      },
+    });
+
+    const result = await bridge.prepareScheduledClean(request());
+    assert.equal(result.outcome, "ready");
+    if (result.outcome !== "ready") return;
+    assert.equal(result.execution.baseRevision, "rev-2");
+    assert.deepEqual(
+      result.execution.mutationPlan.operations[0]?.targetItemIds,
+      ["item-a", "item-b"],
+    );
+    assert.equal(
+      result.execution.mutationPlan.operations[0]?.targetItemIds.includes("item-cleaner-control"),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("relocation rejects drift or removal inside the frozen selection", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lightrsi-clean-execution-selected-drift-"));
+  try {
+    const baseline = sampleSnapshot();
+    await saveScheduledPlan(root, {
+      ...samplePlan(),
+      snapshotItems: baseline.items.map((item) => ({
+        stableId: item.stableId,
+        fingerprint: item.fingerprint,
+      })),
+    });
+    const prepareWith = async (snapshot: ReturnType<typeof sampleSnapshot>) => (
+      createContextCleanerHostExecutionBridge({
+        stateDir: root,
+        hostId: "codex",
+        async readExecutionSnapshot() {
+          return {
+            snapshot,
+            activeTaskIds: ["task-current"],
+            evictableTaskIds: ["task-a"],
+          };
+        },
+      }).prepareScheduledClean(request())
+    );
+
+    const changed = sampleSnapshot("rev-2");
+    changed.items[0] = { ...changed.items[0]!, fingerprint: "changed-selected-item" };
+    const changedResult = await prepareWith(changed);
+    assert.equal(changedResult.outcome, "bypassed");
+    assert.deepEqual(changedResult.reasons, ["clean_execution_item_stale"]);
+
+    const missing = sampleSnapshot("rev-2");
+    missing.items = missing.items.filter((item) => item.stableId !== "item-a");
+    const missingResult = await prepareWith(missing);
+    assert.equal(missingResult.outcome, "bypassed");
+    assert.deepEqual(missingResult.reasons, ["clean_execution_item_stale"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

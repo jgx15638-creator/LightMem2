@@ -68,6 +68,8 @@ export type CodexLifecycleRunnerResult = {
   estimatorUsage?: TaskStateEstimatorOutput["usage"];
   registryVersionBefore?: number;
   registryVersionAfter?: number;
+  estimatorFailureCode?: string;
+  estimatorFailureDurationMs?: number;
   preparedPlan?: CodexLifecyclePreparedPlan;
 };
 
@@ -123,6 +125,8 @@ function result(params: {
   estimatorUsage?: TaskStateEstimatorOutput["usage"];
   registryVersionBefore?: number;
   registryVersionAfter?: number;
+  estimatorFailureCode?: string;
+  estimatorFailureDurationMs?: number;
   preparedPlan?: CodexLifecyclePreparedPlan;
 }): CodexLifecycleRunnerResult {
   return {
@@ -137,6 +141,12 @@ function result(params: {
       : {}),
     ...(params.registryVersionAfter !== undefined
       ? { registryVersionAfter: params.registryVersionAfter }
+      : {}),
+    ...(params.estimatorFailureCode
+      ? { estimatorFailureCode: params.estimatorFailureCode }
+      : {}),
+    ...(params.estimatorFailureDurationMs !== undefined
+      ? { estimatorFailureDurationMs: params.estimatorFailureDurationMs }
       : {}),
     ...(params.preparedPlan ? { preparedPlan: params.preparedPlan } : {}),
   };
@@ -301,6 +311,8 @@ export async function runCodexLifecyclePlanner(
 
   let attemptedEstimator = false;
   let estimatorUsage: TaskStateEstimatorOutput["usage"];
+  let estimatorFailureCode: string | undefined;
+  let estimatorFailureDurationMs: number | undefined;
   try {
     let registry;
     try {
@@ -352,6 +364,8 @@ export async function runCodexLifecyclePlanner(
     });
     attemptedEstimator = planned.attemptedEstimator;
     estimatorUsage = planned.estimatorUsage;
+    estimatorFailureCode = planned.estimatorFailureCode;
+    estimatorFailureDurationMs = planned.estimatorFailureDurationMs;
 
     let preparedPlan: CodexLifecyclePreparedPlan | undefined;
     const runnerReasons: CodexLifecycleRunnerReasonCode[] = [...planned.reasonCodes];
@@ -400,6 +414,8 @@ export async function runCodexLifecyclePlanner(
             ],
             attemptedEstimator: planned.attemptedEstimator,
             estimatorUsage: planned.estimatorUsage,
+            estimatorFailureCode: planned.estimatorFailureCode,
+            estimatorFailureDurationMs: planned.estimatorFailureDurationMs,
             registryVersionBefore,
             registryVersionAfter: error.actualVersion,
           });
@@ -412,6 +428,8 @@ export async function runCodexLifecyclePlanner(
           ],
           attemptedEstimator: planned.attemptedEstimator,
           estimatorUsage: planned.estimatorUsage,
+          estimatorFailureCode: planned.estimatorFailureCode,
+          estimatorFailureDurationMs: planned.estimatorFailureDurationMs,
           registryVersionBefore,
           registryVersionAfter: registryVersionBefore,
         });
@@ -425,6 +443,8 @@ export async function runCodexLifecyclePlanner(
       reasonCodes: runnerReasons,
       attemptedEstimator: planned.attemptedEstimator,
       estimatorUsage: planned.estimatorUsage,
+      estimatorFailureCode: planned.estimatorFailureCode,
+      estimatorFailureDurationMs: planned.estimatorFailureDurationMs,
       registryPersisted,
       registryChanged: planned.registryChanged,
       registryVersionBefore,
@@ -439,6 +459,8 @@ export async function runCodexLifecyclePlanner(
       reasonCodes: ["lifecycle_runner_failed"],
       attemptedEstimator,
       estimatorUsage,
+      estimatorFailureCode,
+      estimatorFailureDurationMs,
     });
   } finally {
     await lock.release();

@@ -87,6 +87,8 @@ export type ContextCleanPlan = {
   hostId: string;
   sessionId: string;
   baseRevision: string;
+  /** Ordered metadata-only baseline used to prove that later history is append-only. */
+  snapshotItems?: Array<{ stableId: string; fingerprint: string }>;
   model?: string;
   contextWindowTokens?: number;
   usedTokens: number | null;

@@ -31,7 +31,9 @@
     "@lightrsi/product-surface": "workspace:*",
     "@lightrsi/reduction": "workspace:*",
     "@lightrsi/stabilizer": "workspace:*",
-    "@lightrsi/tokenpilot": "workspace:*"
+    "@lightrsi/tokenpilot": "workspace:*",
+    "fzstd": "^0.1.1",
+    "ws": "^8.18.3"
   },
   "scripts": {
     "build": "tsx build.ts",
@@ -47,6 +49,7 @@
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "esbuild": "^0.25.10",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

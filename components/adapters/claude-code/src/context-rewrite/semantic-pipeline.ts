@@ -93,6 +93,10 @@ export async function prepareSemanticDelta(params: {
   messages: unknown[];
 }): Promise<SemanticDeltaPreparation> {
   const { stateDir, sessionId, messages } = params;
+  const currentTurnMessages = sliceClaudeMessagesForCurrentUserTurn(messages);
+  if (currentTurnMessages.length === 0) {
+    return { ok: false, note: "internal_request_ignored" };
+  }
   const requestFingerprint = createHash("sha256")
     .update(JSON.stringify(messages))
     .digest("hex");
@@ -107,7 +111,7 @@ export async function prepareSemanticDelta(params: {
     const record = buildRawSemanticTurnRecord({
       sessionId,
       turnSeq,
-      messages: sliceClaudeMessagesForCurrentUserTurn(messages),
+      messages: currentTurnMessages,
     });
     await persistRawSemanticTurnRecord(stateDir, record);
   }

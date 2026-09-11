@@ -85,7 +85,22 @@ export type LifecyclePlannerResult = {
   plan?: ContextMutationPlan;
   deferredBlockIds: string[];
   estimatorUsage?: TaskStateEstimatorOutput["usage"];
+  estimatorFailureCode?: string;
+  estimatorFailureDurationMs?: number;
 };
+
+function estimatorFailureCode(error: unknown): string {
+  if (error instanceof Error && error.name === "AbortError") return "request_timeout";
+  const message = error instanceof Error ? error.message : "";
+  const http = message.match(/^(responses_api_failed|chat_completions_failed):(\d{3})$/);
+  if (http) return `${http[1] === "responses_api_failed" ? "responses" : "chat_completions"}_http_${http[2]}`;
+  if (message === "task_state_estimator_empty_response") return "response_empty";
+  if (message === "task_state_estimator_invalid_json") return "response_invalid_json";
+  if (message === "task_state_estimator_missing_base_version") return "response_missing_base_version";
+  if (message === "task_state_estimator_missing_task_updates") return "response_missing_task_updates";
+  if (error instanceof TypeError) return "network_error";
+  return "unknown";
+}
 
 function uniqueStrings(values: Iterable<string | undefined>): string[] {
   const result: string[] = [];
@@ -292,16 +307,25 @@ export async function planLifecycleEviction<TAdapterMetadata = never>(
   }
 
   let output: unknown;
+  const estimatorStartedAt = Date.now();
   try {
     output = await input.estimator.estimate({
       registry: input.registry,
       delta: input.delta,
     });
-  } catch {
-    return baseResult(input, "bypassed", ["estimator_failed"], true);
+  } catch (error) {
+    return {
+      ...baseResult(input, "bypassed", ["estimator_failed"], true),
+      estimatorFailureCode: estimatorFailureCode(error),
+      estimatorFailureDurationMs: Math.max(0, Date.now() - estimatorStartedAt),
+    };
   }
   if (!validEstimatorOutput(output)) {
-    return baseResult(input, "bypassed", ["estimator_output_invalid"], true);
+    return {
+      ...baseResult(input, "bypassed", ["estimator_output_invalid"], true),
+      estimatorFailureCode: "response_schema_invalid",
+      estimatorFailureDurationMs: Math.max(0, Date.now() - estimatorStartedAt),
+    };
   }
   if (output.baseVersion !== input.registry.version) {
     const result = baseResult(input, "deferred", ["base_version_mismatch"], true);

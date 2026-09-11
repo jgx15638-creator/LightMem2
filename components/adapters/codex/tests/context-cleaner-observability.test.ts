@@ -24,6 +24,7 @@ import { normalizeTokenPilotCodexConfig } from "../src/config.js";
 import { formatCodexDoctorReport, inspectCodexDoctor } from "../src/doctor.js";
 import { renderCodexSessionReport } from "../src/session-report.js";
 import { upsertCodexSessionSnapshot } from "../src/session-state.js";
+import { createCodexCliBridge } from "../../../products/cli/src/hosts/codex.js";
 
 const SESSION_ID = "codex-cleaner-observability-session";
 const PLAN_ID = "codex-cleaner-observability-plan";
@@ -183,6 +184,58 @@ test("reports actual Codex savings only after the shared receipt is applied", as
       fallbackCount: 0,
     });
     assert.doesNotMatch(JSON.stringify(observation), /PRIVATE_/u);
+  });
+});
+
+test("codex CLI report includes applied Cleaner receipt savings", async () => {
+  await withTempState(async (stateDir) => {
+    await writeScheduledCleanerState(stateDir);
+    await transitionContextCleanState({
+      stateDir,
+      receipt: {
+        ...scheduledReceipt(),
+        status: "applied",
+        appliedSavedTokens: 13,
+        appliedSavedChars: 59,
+        evidence: {
+          previousRevision: REVISION,
+          nextRevision: "next-revision",
+          operationIds: ["PRIVATE_OPERATION_ID"],
+          itemIds: ["PRIVATE_ITEM_ID"],
+        },
+        updatedAt: "2026-08-31T00:00:01.000Z",
+      },
+    });
+    assert.equal((await appendCodexCleanerCommitted({
+      stateDir,
+      sessionId: SESSION_ID,
+      cleanPlanId: PLAN_ID,
+      mutationPlanId: "PRIVATE_MUTATION_PLAN",
+      epochId: "PRIVATE_EPOCH",
+      updatedAt: "2026-08-31T00:00:01.000Z",
+    })).outcome, "transitioned");
+    await upsertCodexSessionSnapshot(stateDir, SESSION_ID, {
+      latestResponseId: "response-observability",
+      latestModel: "gpt-test",
+    });
+
+    const tokenPilotConfigPath = join(stateDir, "tokenpilot.json");
+    await writeFile(tokenPilotConfigPath, JSON.stringify({ stateDir }), "utf8");
+    const { handleCommand } = createCodexCliBridge({
+      host: "codex",
+      sessionId: SESSION_ID,
+      pathOverrides: { tokenPilotConfigPath },
+    });
+
+    const reportText = (await handleCommand({ args: "report" })).text;
+
+    assert.match(reportText, /Cleaner estimated savings: 17 tokens, 71 chars/i);
+    assert.match(reportText, /Cleaner scheduled savings: none/i);
+    assert.match(reportText, /Cleaner applied savings: 13 tokens, 59 chars/i);
+    assert.match(reportText, /Cleaner fallback count: 0/i);
+    assert.match(reportText, /no reduction savings recorded yet/i);
+    assert.doesNotMatch(reportText, /^- no savings recorded yet$/imu);
+    assert.doesNotMatch(reportText, /PRIVATE_/u);
   });
 });
 

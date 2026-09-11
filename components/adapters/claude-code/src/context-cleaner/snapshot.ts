@@ -6,8 +6,12 @@ import { buildToolResultSegments } from "../eviction.js";
 function provenTaskIds(
   registry: SessionTaskRegistry,
   segmentId: string,
+  toolUseId: string,
+  turnAbsIdByToolCallId?: ReadonlyMap<string, string>,
 ): string[] | undefined {
-  const related = registry.blockToTaskIds[segmentId];
+  const direct = registry.blockToTaskIds[segmentId];
+  const turnAbsId = turnAbsIdByToolCallId?.get(toolUseId);
+  const related = direct ?? (turnAbsId ? registry.turnToTaskIds[turnAbsId] : undefined);
   if (!related || related.length === 0) return undefined;
   const normalized = related.map((taskId) => taskId.trim());
   if (normalized.some((taskId) => !taskId || registry.tasks[taskId] === undefined)
@@ -26,6 +30,7 @@ export function attributeClaudeSnapshotTasks(params: {
   snapshot: ModelContextSnapshot;
   messages: unknown[];
   registry: SessionTaskRegistry;
+  turnAbsIdByToolCallId?: ReadonlyMap<string, string>;
 }): ModelContextSnapshot {
   const cleanItems = params.snapshot.items.map(({ taskIds: _taskIds, ...item }) => item);
   if (params.snapshot.hostId !== "claude-code"
@@ -45,7 +50,12 @@ export function attributeClaudeSnapshotTasks(params: {
   const attributedTaskIds = new Map<string, string[]>();
   const { bindings } = buildToolResultSegments(params.messages);
   for (const binding of bindings.values()) {
-    const taskIds = provenTaskIds(params.registry, binding.segmentId);
+    const taskIds = provenTaskIds(
+      params.registry,
+      binding.segmentId,
+      binding.toolUseId,
+      params.turnAbsIdByToolCallId,
+    );
     if (!taskIds) continue;
     const resultStableId = `${params.snapshot.sessionId}:${binding.messageIndex}:${binding.blockIndex}`;
     const result = itemsByStableId.get(resultStableId);

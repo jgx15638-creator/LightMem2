@@ -1,7 +1,27 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { normalizeTokenPilotCodexConfig } from "../src/config.js";
+import {
+  loadTokenPilotCodexConfig,
+  normalizeTokenPilotCodexConfig,
+} from "../src/config.js";
+
+test("loadTokenPilotCodexConfig accepts a UTF-8 BOM", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "lightrsi-codex-config-bom-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "tokenpilot.json");
+  await writeFile(configPath, `\uFEFF${JSON.stringify({
+    enabled: true,
+    proxyPort: 17668,
+  })}`, "utf8");
+
+  const config = await loadTokenPilotCodexConfig(configPath);
+
+  assert.equal(config.enabled, true);
+  assert.equal(config.proxyPort, 17668);
+});
 
 test("normalizeTokenPilotCodexConfig applies stable defaults", () => {
   const config = normalizeTokenPilotCodexConfig({});
@@ -105,5 +125,14 @@ test("normalizeTokenPilotCodexConfig enables real-provider compatibility learnin
   assert.equal(
     normalizeTokenPilotCodexConfig({}).contextRewrite.providerCompatibilityProbe,
     "real_provider",
+  );
+});
+
+test("normalizeTokenPilotCodexConfig preserves a disabled compatibility probe", () => {
+  assert.equal(
+    normalizeTokenPilotCodexConfig({
+      contextRewrite: { providerCompatibilityProbe: "disabled" },
+    }).contextRewrite.providerCompatibilityProbe,
+    "disabled",
   );
 });

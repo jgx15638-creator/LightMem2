@@ -1910,8 +1910,10 @@ test("lifecycle estimator rewrites the real Claude upstream payload", async () =
       (item) => item.callId === "toolu_lifecycle_e2e",
     ) ?? [];
     assert.equal(attributedPair.length, 2);
-    // turnToTaskIds alone is not enough proof for Cleaner item ownership.
-    assert.ok(attributedPair.every((item) => item.taskIds === undefined));
+    // A unique persisted tool-call -> semantic-turn link plus turn ownership is
+    // sufficient proof for Cleaner item ownership.
+    assert.ok(attributedPair.every((item) =>
+      JSON.stringify(item.taskIds) === JSON.stringify(["task-lifecycle-e2e"])));
     assert.equal(
       cleanerSnapshot?.snapshot.items.at(-1)?.taskIds,
       undefined,

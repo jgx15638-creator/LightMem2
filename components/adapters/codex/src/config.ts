@@ -56,20 +56,24 @@ type NormalizeCodexConfigOptions = {
   configPath?: string;
 };
 
+function runtimeHomeDir(): string {
+  return process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir();
+}
+
 export function expandHomePath(value: string): string {
-  if (value === "~") return homedir();
-  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  if (value === "~") return runtimeHomeDir();
+  if (value.startsWith("~/")) return join(runtimeHomeDir(), value.slice(2));
   return value;
 }
 
 export function defaultCodexConfigPath(): string {
-  return join(homedir(), ".codex", "config.toml");
+  return join(runtimeHomeDir(), ".codex", "config.toml");
 }
 
 export function defaultTokenPilotConfigPath(): string {
   return process.env.TOKENPILOT_CODEX_CONFIG
     ? resolve(process.env.TOKENPILOT_CODEX_CONFIG)
-    : join(homedir(), ".codex", "tokenpilot.json");
+    : join(runtimeHomeDir(), ".codex", "tokenpilot.json");
 }
 
 export function defaultStateDir(configPath = defaultTokenPilotConfigPath()): string {
@@ -79,7 +83,7 @@ export function defaultStateDir(configPath = defaultTokenPilotConfigPath()): str
 export function defaultHooksConfigPath(): string {
   return process.env.CODEX_HOOKS_CONFIG_PATH
     ? resolve(process.env.CODEX_HOOKS_CONFIG_PATH)
-    : join(homedir(), ".codex", "hooks.json");
+    : join(runtimeHomeDir(), ".codex", "hooks.json");
 }
 
 export function resolvedCodexConfigPath(): string {
@@ -232,7 +236,8 @@ export function normalizeTokenPilotCodexConfig(
       failureMode: "bypass",
       retryOriginalRequest: boolValue(contextRewrite.retryOriginalRequest, true),
       cooldownMs: numberValue(contextRewrite.cooldownMs, 300_000, 0, 86_400_000),
-      providerCompatibilityProbe: contextRewrite.providerCompatibilityProbe === "mock_fixture"
+      providerCompatibilityProbe: contextRewrite.providerCompatibilityProbe === "disabled"
+        || contextRewrite.providerCompatibilityProbe === "mock_fixture"
         || contextRewrite.providerCompatibilityProbe === "real_provider"
         ? contextRewrite.providerCompatibilityProbe
         : "real_provider",
@@ -257,7 +262,7 @@ export async function loadTokenPilotCodexConfig(configPath = defaultTokenPilotCo
   if (!existsSync(configPath)) {
     return normalizeTokenPilotCodexConfig({}, { configPath });
   }
-  const text = await readFile(configPath, "utf8");
+  const text = (await readFile(configPath, "utf8")).replace(/^\uFEFF/u, "");
   return normalizeTokenPilotCodexConfig(JSON.parse(text), { configPath });
 }
 
@@ -328,13 +333,21 @@ export async function readCodexProviderFromToml(
 export async function readCodexRootModelProvider(
   configPath = defaultCodexConfigPath(),
 ): Promise<string | undefined> {
+  return readCodexRootStringAssignment("model_provider", configPath);
+}
+
+export async function readCodexRootStringAssignment(
+  key: string,
+  configPath = defaultCodexConfigPath(),
+): Promise<string | undefined> {
   if (!existsSync(configPath)) return undefined;
   const text = await readFile(configPath, "utf8");
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     if (/^\[.+\]$/.test(trimmed)) break;
-    const assignment = /^model_provider\s*=\s*(.+)$/.exec(trimmed);
+    const assignment = new RegExp(`^${escapedKey}\\s*=\\s*(.+)$`).exec(trimmed);
     if (!assignment) continue;
     return parseTomlStringValue(assignment[1]);
   }

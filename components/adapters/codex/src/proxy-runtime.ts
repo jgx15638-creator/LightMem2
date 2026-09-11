@@ -18,6 +18,7 @@ import {
   prepareBeforeCallWithReductionSummary,
   recordUxEffect,
   forwardGatewayRawRequest,
+  HttpRequestBodyLimitError,
   sendJsonResponse,
   startHostGatewayRuntimeServer,
   setForwardResponseHeaders,
@@ -47,6 +48,7 @@ import { prepareCodexStablePrefix } from "./stable-prefix.js";
 import {
   requestUpstreamResponses,
   requestUpstreamResponsesStream,
+  resolveCodexRequestUpstream,
 } from "./upstream.js";
 import {
   appendCodexRecentTurnBinding,
@@ -69,6 +71,7 @@ import {
   buildCodexEffectiveHistoryView,
   collectCodexResponseItemsFromStream,
   parseCodexRollout,
+  resolveCodexEffectiveHistoryCurrentInputClosures,
   validateCodexRolloutBootstrap,
 } from "./context-history/index.js";
 import type {
@@ -108,8 +111,25 @@ import {
   prepareCodexCleanerRebase,
   revalidateCodexCleanerPreparedRebase,
   type CodexCleanerPreparedRebase,
+  withCodexCleanerReplayAccounting,
 } from "./context-cleaner/runtime.js";
 import { readCodexCleanerSchedule } from "./context-cleaner/scheduler.js";
+import {
+  codexAuthErrorPayload,
+  resolveCodexAuthContext,
+} from "./transport/auth-context.js";
+import {
+  CODEX_RESPONSE_PATHS,
+  codexUpstreamRequestPath,
+  isCodexModelsPath,
+  isCodexResponsesPath,
+} from "./transport/routes.js";
+import {
+  CODEX_MAX_ENCODED_REQUEST_BYTES,
+  CodexRequestBodyError,
+  decodeCodexRequestBody,
+} from "./transport/request-body.js";
+import { createCodexWebSocketCompatibilityBridge } from "./transport/websocket-bridge.js";
 
 export type CodexProxyRuntime = {
   baseUrl: string;
@@ -391,20 +411,12 @@ function canAttemptCodexRebase(params: {
   );
 }
 
-function upstreamRequestPath(baseUrl: string, inboundPath: string): string {
-  const base = baseUrl.replace(/\/+$/, "");
-  if (base.endsWith("/v1")) {
-    return inboundPath.startsWith("/v1") ? inboundPath.slice(3) || "/" : inboundPath;
-  }
-  return inboundPath.startsWith("/v1") ? inboundPath : `/v1${inboundPath}`;
-}
-
 async function forwardPureProviderWire(params: {
   upstream: Awaited<ReturnType<typeof resolveUpstreamProvider>>;
   req: import("node:http").IncomingMessage;
   res: import("node:http").ServerResponse;
   pathname: string;
-  body: string;
+  body: Buffer;
   controller: AbortController;
   stateDir: string;
   requestStartedAt: number;
@@ -412,7 +424,7 @@ async function forwardPureProviderWire(params: {
 }): Promise<void> {
   const requestId = randomUUID();
   const dispatchAt = performance.now();
-  const requestBytes = Buffer.byteLength(params.body, "utf8");
+  const requestBytes = params.body.byteLength;
   let responseStatus: number | null = null;
   let headersAt: number | null = null;
   let firstResponseBodyChunkAt: number | null = null;
@@ -468,11 +480,12 @@ async function forwardPureProviderWire(params: {
         protocol: "custom",
       },
       method: params.req.method ?? "POST",
-      requestPath: upstreamRequestPath(params.upstream.baseUrl, params.pathname),
+      requestPath: codexUpstreamRequestPath(params.upstream.baseUrl, params.req.url ?? params.pathname),
       body: params.body,
       inboundAuthorization,
       inboundHeaders: params.req.headers,
       includeJsonContentType: false,
+      preserveContentEncoding: true,
       signal: params.controller.signal,
     });
     responseStatus = response.status;
@@ -538,6 +551,63 @@ async function forwardPureProviderWire(params: {
       responseWritableFinished: params.res.writableFinished,
     });
   }
+}
+
+function authorizeCodexProxyRequest(params: {
+  upstream: Awaited<ReturnType<typeof resolveUpstreamProvider>>;
+  upstreamProvider?: string;
+  headers: import("node:http").IncomingHttpHeaders;
+  res: import("node:http").ServerResponse;
+}): boolean {
+  const auth = resolveCodexAuthContext({
+    upstream: params.upstream,
+    upstreamProvider: params.upstreamProvider,
+    inboundHeaders: params.headers,
+    envApiKey: process.env.OPENAI_API_KEY,
+  });
+  const payload = codexAuthErrorPayload(auth);
+  if (!payload) return true;
+  sendJsonResponse(params.res, 401, payload);
+  return false;
+}
+
+async function forwardCodexMetadataRoute(params: {
+  upstream: Awaited<ReturnType<typeof resolveUpstreamProvider>>;
+  req: import("node:http").IncomingMessage;
+  res: import("node:http").ServerResponse;
+}): Promise<void> {
+  const authorization = Array.isArray(params.req.headers.authorization)
+    ? params.req.headers.authorization.join(", ")
+    : params.req.headers.authorization;
+  const response = await forwardGatewayRawRequest({
+    upstream: {
+      baseUrl: params.upstream.baseUrl,
+      apiKey: params.upstream.apiKey,
+      name: params.upstream.name,
+      protocol: "custom",
+    },
+    method: "GET",
+    requestPath: codexUpstreamRequestPath(params.upstream.baseUrl, params.req.url ?? "/models"),
+    inboundAuthorization: authorization,
+    inboundHeaders: params.req.headers,
+  });
+  params.res.statusCode = response.status;
+  setForwardResponseHeaders(
+    params.res,
+    Object.fromEntries(response.headers.entries()),
+    "application/json; charset=utf-8",
+  );
+  if (!response.body) {
+    params.res.end();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const stream = Readable.fromWeb(response.body as any);
+    params.res.once("finish", resolve);
+    params.res.once("error", reject);
+    stream.once("error", reject);
+    stream.pipe(params.res);
+  });
 }
 
 export async function startCodexResponsesProxy(params: {
@@ -615,20 +685,44 @@ export async function startCodexResponsesProxy(params: {
     await recovery;
   }
 
+  const webSocketBridge = createCodexWebSocketCompatibilityBridge({ port: config.proxyPort });
   const runtime = await startHostGatewayRuntimeServer({
     port: config.proxyPort,
     requestPath: "/v1/responses",
+    requestPaths: CODEX_RESPONSE_PATHS,
+    maxRequestBodyBytes: CODEX_MAX_ENCODED_REQUEST_BYTES,
     basePath: "/v1",
+    decodeRequestBody({ req, body }) {
+      return decodeCodexRequestBody(body, req.headers["content-encoding"]);
+    },
     healthPayload: {
       ok: true,
       adapter: "tokenpilot-codex",
       upstream: upstreamProviderName,
       stateDir: config.stateDir,
     },
-    async handleRoute({ req, res, pathname, readBody }) {
+    handleUpgrade(args) {
+      return webSocketBridge.handleUpgrade(args);
+    },
+    async handleRoute({ req, res, pathname, readBodyBuffer }) {
+      if (req.method === "GET" && isCodexModelsPath(pathname)) {
+        const requestUpstream = resolveCodexRequestUpstream({
+          upstream,
+          upstreamProvider: config.upstreamProvider,
+          inboundHeaders: req.headers,
+        });
+        if (!authorizeCodexProxyRequest({
+          upstream: requestUpstream,
+          upstreamProvider: config.upstreamProvider,
+          headers: req.headers,
+          res,
+        })) return true;
+        await forwardCodexMetadataRoute({ upstream: requestUpstream, req, res });
+        return true;
+      }
       if (!config.proxyMode.pureForward
         || req.method !== "POST"
-        || !["/v1/responses", "/v1/chat/completions"].includes(pathname)) {
+        || !(isCodexResponsesPath(pathname) || pathname === "/v1/chat/completions")) {
         return false;
       }
       const requestStartedAt = performance.now();
@@ -640,10 +734,21 @@ export async function startCodexResponsesProxy(params: {
       req.once("aborted", onRequestAborted);
       res.once("close", onResponseClose);
       try {
-        const body = await readBody(controller.signal);
+        const body = await readBodyBuffer(controller.signal);
         const bodyReceivedAt = performance.now();
-        await forwardPureProviderWire({
+        const requestUpstream = resolveCodexRequestUpstream({
           upstream,
+          upstreamProvider: config.upstreamProvider,
+          inboundHeaders: req.headers,
+        });
+        if (!authorizeCodexProxyRequest({
+          upstream: requestUpstream,
+          upstreamProvider: config.upstreamProvider,
+          headers: req.headers,
+          res,
+        })) return true;
+        await forwardPureProviderWire({
+          upstream: requestUpstream,
           req,
           res,
           pathname,
@@ -662,6 +767,17 @@ export async function startCodexResponsesProxy(params: {
       return true;
     },
     async handleRequest({ req, res, body }) {
+      const requestUpstream = resolveCodexRequestUpstream({
+        upstream,
+        upstreamProvider: config.upstreamProvider,
+        inboundHeaders: req.headers,
+      });
+      if (!authorizeCodexProxyRequest({
+        upstream: requestUpstream,
+        upstreamProvider: config.upstreamProvider,
+        headers: req.headers,
+        res,
+      })) return;
       const inboundPayload = JSON.parse(body) as JsonObject;
       normalizeResponsesInputForUpstream(inboundPayload?.input);
       const inboundPromptCacheKey =
@@ -824,9 +940,10 @@ export async function startCodexResponsesProxy(params: {
         effectiveHistoryViewPromise ??= buildEffectiveHistoryViewForHead();
         return effectiveHistoryViewPromise;
       };
-      const effectiveHistoryForHead = async () => (
-        await effectiveHistoryViewForHead()
-      ).history;
+      const effectiveHistoryForHead = async () => resolveCodexEffectiveHistoryCurrentInputClosures({
+        view: await effectiveHistoryViewForHead(),
+        currentInput: originalPayload.input,
+      });
 
       if (manualCleanerReserved) {
         if (!config.contextRewrite.enabled) {
@@ -986,6 +1103,12 @@ export async function startCodexResponsesProxy(params: {
               registryVersionBefore: lifecycleResult.registryVersionBefore ?? null,
               registryVersionAfter: lifecycleResult.registryVersionAfter ?? null,
               estimatorUsage: lifecycleResult.estimatorUsage ?? null,
+              ...(lifecycleResult.estimatorFailureCode
+                ? { estimatorFailureCode: lifecycleResult.estimatorFailureCode }
+                : {}),
+              ...(lifecycleResult.estimatorFailureDurationMs !== undefined
+                ? { estimatorFailureDurationMs: lifecycleResult.estimatorFailureDurationMs }
+                : {}),
             });
             if (lifecycleResult.preparedPlan) {
               activeLifecyclePlan = codexSharedLifecyclePlan(lifecycleResult.preparedPlan.plan);
@@ -1129,7 +1252,6 @@ export async function startCodexResponsesProxy(params: {
       }
 
       const canPrepareContinuationReplay = !rebaseRequest
-        && !manualCleanerReserved
         && requestJournalEntry
         && typeof originalPayload.previous_response_id === "string"
         && config.contextRewrite.providerCompatibilityProbe !== "disabled";
@@ -1241,6 +1363,13 @@ export async function startCodexResponsesProxy(params: {
       normalizeResponsesInputForUpstream(payload?.input);
       if (rebaseRequest) {
         rebaseAccounting = withCodexRebaseReplayAccountingInput(rebaseRequest.accounting, payload.input);
+        if (cleanerPreparedRebase) {
+          cleanerPreparedRebase = withCodexCleanerReplayAccounting(
+            cleanerPreparedRebase,
+            rebaseAccounting,
+          );
+          rebaseRequest = cleanerPreparedRebase.rebaseRequest;
+        }
       }
       const fallbackPayload = cloneJsonObject(originalPayload);
       if (rebaseRequest) {
@@ -1315,9 +1444,10 @@ export async function startCodexResponsesProxy(params: {
 
       const authorization = typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
       const sendUpstream = (nextPayload: JsonObject) => requestUpstreamResponses({
-        upstream,
+        upstream: requestUpstream,
         payload: nextPayload,
         inboundAuthorization: authorization,
+        inboundHeaders: req.headers,
         stateDir: config.stateDir,
       });
       const acceptedEvidence: CodexRebaseCapabilityEvidence[] = params.allowMockFixtureEvidence
@@ -1329,7 +1459,7 @@ export async function startCodexResponsesProxy(params: {
         model,
         wireMode: CODEX_REBASE_WIRE_MODE,
         apiVersion: CODEX_REBASE_API_VERSION,
-        endpointId: codexRebaseEndpointIdentity(upstream.baseUrl),
+        endpointId: codexRebaseEndpointIdentity(requestUpstream.baseUrl),
         itemSchemaVersion: CODEX_REBASE_ITEM_SCHEMA_VERSION,
         probeMode: config.contextRewrite.providerCompatibilityProbe,
         acceptedEvidence,
@@ -1862,9 +1992,10 @@ export async function startCodexResponsesProxy(params: {
           return;
         }
         const upstreamResp = await requestUpstreamResponsesStream({
-          upstream,
+          upstream: requestUpstream,
           payload,
           inboundAuthorization: authorization,
+          inboundHeaders: req.headers,
           stateDir: config.stateDir,
         });
         res.statusCode = upstreamResp.status;
@@ -2017,6 +2148,26 @@ export async function startCodexResponsesProxy(params: {
       const err = error;
       const message = err instanceof Error ? err.message : String(err);
       logger.error(message);
+      if (err instanceof CodexRequestBodyError) {
+        sendJsonResponse(res, err.statusCode, {
+          error: {
+            type: "invalid_request_error",
+            code: err.code,
+            message: err.message,
+          },
+        });
+        return;
+      }
+      if (err instanceof HttpRequestBodyLimitError) {
+        sendJsonResponse(res, err.statusCode, {
+          error: {
+            type: "invalid_request_error",
+            code: err.code,
+            message: "Encoded Codex request body exceeds the configured safety limit.",
+          },
+        });
+        return;
+      }
       sendJsonResponse(res, 500, { error: message });
     },
   });
@@ -2025,6 +2176,9 @@ export async function startCodexResponsesProxy(params: {
   logger.info(`proxy listening at ${baseUrl}; upstream=${upstream.baseUrl}`);
   return {
     baseUrl,
-    close: runtime.close,
+    async close() {
+      await webSocketBridge.close();
+      await runtime.close();
+    },
   };
 }

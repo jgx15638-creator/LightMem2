@@ -10,9 +10,21 @@ const repoRoot = resolve(adapterDir, "../../..");
 const npmExecPath = process.env.npm_execpath;
 
 function npmInvocation(args) {
-  return npmExecPath
-    ? { command: process.execPath, args: [npmExecPath, ...args] }
-    : { command: process.platform === "win32" ? "npm.cmd" : "npm", args };
+  if (npmExecPath) {
+    return { command: process.execPath, args: [npmExecPath, ...args] };
+  }
+  if (process.platform === "win32") {
+    for (const arg of args) {
+      if (!/^[A-Za-z0-9._:@/-]+$/u.test(arg)) {
+        throw new Error("Refusing to pass an unsafe argument to npm.cmd");
+      }
+    }
+    return {
+      command: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/s", "/c", ["npm.cmd", ...args].join(" ")],
+    };
+  }
+  return { command: "npm", args };
 }
 
 function childEnv(workdir, extra = {}) {

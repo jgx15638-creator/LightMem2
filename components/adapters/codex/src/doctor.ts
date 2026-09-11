@@ -18,6 +18,7 @@ import {
   readCodexMcpServerFromToml,
   readCodexProviderFromToml,
   readCodexRootModelProvider,
+  readCodexRootStringAssignment,
 } from "./config.js";
 import {
   formatCodexRebaseCapabilityStatus,
@@ -74,6 +75,10 @@ export type CodexDoctorReport = {
   rebaseCapabilityIssue?: string;
   taskStateEstimator?: CodexEstimatorDiagnostic;
   cleaner?: CodexCleanerObservability;
+  managedOpenAIProvider?: boolean;
+  openAIBaseUrlIntercepted?: boolean;
+  chatGptBackendRoutingConfigured?: boolean;
+  responsesWebSocketRoutingConfigured?: boolean;
 };
 
 export type CodexProviderDiagnostic = {
@@ -197,6 +202,10 @@ export function formatCodexDoctorReport(report: CodexDoctorReport): string {
     `- provider installed: ${report.providerInstalled ? "yes" : "no"}`,
     `- active provider selected: ${report.providerActive ? "yes" : "no"}`,
     `- active provider routed through proxy: ${report.providerIntercepted ? "yes" : "no"}`,
+    `- managed OpenAI provider mode: ${report.managedOpenAIProvider ? "yes" : "no"}`,
+    `- OpenAI API base routed through proxy: ${report.openAIBaseUrlIntercepted ? "yes" : "no"}`,
+    `- ChatGPT Codex backend routing configured: ${report.chatGptBackendRoutingConfigured ? "yes" : "no"}`,
+    `- Responses WebSocket routing configured: ${report.responsesWebSocketRoutingConfigured ? "yes" : "no"}`,
     `- recovery MCP installed: ${report.mcpInstalled ? "yes" : "no"}`,
     `- hooks installed: ${report.hooksInstalled ? "yes" : "no"}`,
     `- hooks complete: ${report.hooksComplete ? "yes" : "no"}`,
@@ -289,8 +298,14 @@ export async function inspectCodexDoctor(params: {
   const providerName = params.config.providerName || "tokenpilot";
   const expectedHookCommand = await resolveCodexHookCommandForInstall();
   const expectedMcpSpec = resolveCodexMcpServerSpecForInstall(params.config.stateDir);
-  const tokenpilotProvider = await readCodexProviderFromToml(providerName, params.configPath);
   const rootProvider = await readCodexRootModelProvider(params.configPath);
+  const managedOpenAIProvider = providerName === "openai";
+  const configuredProvider = managedOpenAIProvider
+    ? undefined
+    : await readCodexProviderFromToml(providerName, params.configPath);
+  const openAIBaseUrl = managedOpenAIProvider
+    ? await readCodexRootStringAssignment("openai_base_url", params.configPath)
+    : undefined;
   const mcp = await readCodexMcpServerFromToml(TOKENPILOT_MCP_SERVER_NAME, params.configPath);
   let hooksRoot: Record<string, unknown> = {};
   if (existsSync(params.hooksConfigPath)) {
@@ -306,12 +321,22 @@ export async function inspectCodexDoctor(params: {
     hooksRoot: asObjectRecord(hooksRoot),
     hookEventNames: HOOK_EVENT_NAMES,
     isTokenPilotCommand(command) {
-      return command.includes("hooks-handler.js") || command.includes("tokenpilot-codex-hook.cmd");
+      return command.includes("hooks-handler.js")
+        || command.includes("tokenpilot-codex-hook.cmd")
+        || command.includes("tokenpilot-codex-hook.ps1");
     },
     expectedCommand: expectedHookCommand,
   });
   const proxyHealthy = await checkHealth(proxyBaseUrl);
-  const providerIntercepted = tokenpilotProvider?.baseUrl === proxyBaseUrl;
+  const openAIBaseUrlIntercepted = openAIBaseUrl === proxyBaseUrl;
+  const providerInstalled = managedOpenAIProvider
+    ? openAIBaseUrlIntercepted
+    : Boolean(configuredProvider);
+  const providerIntercepted = managedOpenAIProvider
+    ? openAIBaseUrlIntercepted
+    : configuredProvider?.baseUrl === proxyBaseUrl;
+  const chatGptBackendRoutingConfigured = managedOpenAIProvider && openAIBaseUrlIntercepted;
+  const responsesWebSocketRoutingConfigured = providerIntercepted;
   const fallbackUpstreamBaseUrl = params.config.upstreamProvider
     ? (await readCodexProviderFromToml(params.config.upstreamProvider, params.configPath))?.baseUrl
     : undefined;
@@ -335,7 +360,7 @@ export async function inspectCodexDoctor(params: {
       ? `${capabilityJournal.malformedLineCount} malformed row(s)`
       : undefined);
   const coreRuntimeHealthy = params.config.enabled
-    && Boolean(tokenpilotProvider)
+    && providerInstalled
     && providerIntercepted
     && daemon.running
     && proxyHealthy;
@@ -357,7 +382,7 @@ export async function inspectCodexDoctor(params: {
     expectedMcpCommand: expectedMcpSpec.command,
     expectedMcpArgs: expectedMcpSpec.args,
     adapterEnabled: params.config.enabled,
-    providerInstalled: Boolean(tokenpilotProvider),
+    providerInstalled,
     providerActive: rootProvider === providerName,
     providerIntercepted,
     hooksInstalled,
@@ -385,5 +410,9 @@ export async function inspectCodexDoctor(params: {
     rebaseCapabilityIssue,
     taskStateEstimator,
     cleaner,
+    managedOpenAIProvider,
+    openAIBaseUrlIntercepted,
+    chatGptBackendRoutingConfigured,
+    responsesWebSocketRoutingConfigured,
   };
 }
