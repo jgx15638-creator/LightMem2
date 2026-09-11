@@ -216,6 +216,39 @@ test("missing recommendation provider fails closed without making tasks unsafe",
   }
 });
 
+test("analysis identity includes fallback evidence when the task view is unchanged", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lightrsi-clean-analysis-identity-"));
+  try {
+    const unavailable = await analyzeContextCleanSession({
+      stateDir: root,
+      bridge: bridge(),
+      sessionId: "session-1",
+      async loadRegistry() { return registry(); },
+    });
+    const failedProvider: ContextCleanRecommendationProvider = {
+      async recommend() { throw new Error("provider failed"); },
+    };
+    const failed = await analyzeContextCleanSession({
+      stateDir: root,
+      bridge: bridge(),
+      sessionId: "session-1",
+      provider: failedProvider,
+      async loadRegistry() { return registry(); },
+    });
+
+    assert.deepEqual(failed.plan.tasks, unavailable.plan.tasks);
+    assert.notEqual(failed.plan.planId, unavailable.plan.planId);
+    assert.deepEqual(unavailable.reasons, ["recommendation_provider_unavailable"]);
+    assert.deepEqual(failed.reasons, ["recommendation_provider_failed"]);
+    assert.equal(
+      (await readContextCleanReceipt({ stateDir: root, planId: failed.plan.planId })).value?.fallbackUsed,
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cancelling a chars-only plan preserves null token accounting and char savings", async () => {
   const root = await mkdtemp(join(tmpdir(), "lightrsi-clean-cancel-chars-"));
   try {
