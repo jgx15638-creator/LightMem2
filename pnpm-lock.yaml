@@ -111,6 +111,13 @@ importers:
         version: 5.9.3
 
   components/adapters/deepseek-harness:
+    dependencies:
+      '@lightrsi/cleaner':
+        specifier: workspace:*
+        version: link:../../packages/features/cleaner
+      '@lightrsi/host-adapter':
+        specifier: workspace:*
+        version: link:../../packages/foundation/host-adapter
     devDependencies:
       '@lightrsi/eviction':
         specifier: workspace:*
