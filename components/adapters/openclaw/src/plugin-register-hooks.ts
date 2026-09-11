@@ -148,7 +148,7 @@ export function registerLayeredContextEngine(params: {
   if (!cfg.contextEngine.enabled) return;
 
   if (typeof api.registerContextEngine === "function") {
-    api.registerContextEngine("layered-context", () => createPluginContextEngine(cfg, logger, {
+    api.registerContextEngine("tokenpilot", () => createPluginContextEngine(cfg, logger, {
       appendTaskStateTrace,
       appendEvictionVisualSnapshot,
       readTranscriptEntriesForSession,

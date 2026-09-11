@@ -3,7 +3,7 @@
   "activation": {
     "onStartup": true
   },
-  "kind": "runtime",
+  "kind": "context-engine",
   "name": "TokenPilot Runtime Optimizer",
   "version": "0.1.0-beta.1",
   "description": "Token-efficiency runtime plugin for OpenClaw with pluggable routing and optimization hooks.",

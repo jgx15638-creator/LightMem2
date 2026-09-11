@@ -75,7 +75,7 @@ test("openclaw CLI bridge resolves explicit session stats and missing aggregate 
             },
           },
           slots: {
-            contextEngine: "layered-context",
+            contextEngine: "tokenpilot",
           },
         },
       }, null, 2)}\n`,

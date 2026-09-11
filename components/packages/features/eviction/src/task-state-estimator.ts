@@ -5,7 +5,10 @@ import type {
   TaskStateEstimatorInput,
   TaskStateEstimatorOutput,
 } from "./types.js";
-import { createApiJsonModelClient } from "./json-model-client.js";
+import {
+  createApiJsonModelClient,
+  type JsonModelClient,
+} from "./json-model-client.js";
 
 function truncateText(value: string, maxChars = 600): string {
   const text = value.trim();
@@ -292,14 +295,15 @@ function parseEstimatorOutput(
 
 export function createApiTaskStateEstimator(
   cfg: TaskStateEstimatorApiConfig,
+  createClient?: (config: TaskStateEstimatorApiConfig) => JsonModelClient,
 ): TaskStateEstimator {
-  if (!cfg.baseUrl || !cfg.apiKey || !cfg.model) {
+  if (!createClient && (!cfg.baseUrl || !cfg.apiKey || !cfg.model)) {
     throw new Error("task-state estimator requires baseUrl, apiKey, and model");
   }
   const evictionLookaheadTurns = Math.max(1, cfg.evictionLookaheadTurns ?? 3);
   const lifecycleMode = cfg.lifecycleMode === "decoupled" ? "decoupled" : "coupled";
   const evidenceMode = cfg.evidenceMode === "two_state" ? "two_state" : "three_state";
-  const client = createApiJsonModelClient(cfg);
+  const client = (createClient ?? createApiJsonModelClient)(cfg);
   return {
     async estimate(input: TaskStateEstimatorInput): Promise<TaskStateEstimatorOutput> {
       const response = await client.request({

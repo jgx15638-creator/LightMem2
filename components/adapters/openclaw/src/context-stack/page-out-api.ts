@@ -3,6 +3,7 @@ export {
   inferObservationPayloadKind,
   readTranscriptEntriesForSession,
   readTranscriptMessagesForSession,
+  syncRawSemanticTurnsFromMessages,
   syncRawSemanticTurnsFromTranscript,
   transcriptMessageStableId,
   type StructuredTurnObservation,
