@@ -9,6 +9,7 @@ export async function installWindowsNodeCommandLauncher(params: {
   targetPath: string;
   platform?: NodeJS.Platform;
   nodePath?: string;
+  fixedArgs?: readonly string[];
 }): Promise<string | undefined> {
   if ((params.platform ?? process.platform) !== "win32") return undefined;
 
@@ -16,6 +17,8 @@ export async function installWindowsNodeCommandLauncher(params: {
   const powerShellPath = `${params.binPath}.ps1`;
   const nodePath = quotePowerShellLiteral(params.nodePath ?? process.execPath);
   const targetPath = quotePowerShellLiteral(params.targetPath);
+  const fixedArgs = (params.fixedArgs ?? []).map(quotePowerShellLiteral).join(" ");
+  const fixedArgSuffix = fixedArgs ? ` ${fixedArgs}` : "";
   // Keep the cmd shim ASCII-only. cmd.exe decodes batch files using the active
   // console code page, which corrupts absolute paths containing non-ASCII text.
   // Windows PowerShell 5.1 reliably detects the UTF-8 BOM on the companion file.
@@ -26,7 +29,7 @@ export async function installWindowsNodeCommandLauncher(params: {
   );
   await writeFile(
     powerShellPath,
-    `\uFEFF$ErrorActionPreference = 'Stop'\r\n& ${nodePath} ${targetPath} @args\r\nexit $LASTEXITCODE\r\n`,
+    `\uFEFF$ErrorActionPreference = 'Stop'\r\n& ${nodePath} ${targetPath}${fixedArgSuffix} @args\r\nexit $LASTEXITCODE\r\n`,
     "utf8",
   );
   return launcherPath;

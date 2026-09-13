@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { installLightRsiCliBin } from "../../shared/cli-bin-install.js";
+import {
+  installLightRsiCliBin,
+  installLightRsiCommandAlias,
+} from "../../shared/cli-bin-install.js";
 import { installHostCliBin } from "../../shared/host-cli-bin-install.js";
 
 const execFileAsync = promisify(execFile);
@@ -34,16 +37,60 @@ test("CLI bin installer writes Windows command launchers for the shared and host
       platform: "win32",
       nodePath: "C:\\Program Files\\nodejs\\node.exe",
     });
+    const clean = await installLightRsiCommandAlias({
+      adapterRoot,
+      binDir,
+      binName: "lightrsi-clean",
+      fixedArgs: ["codex", "clean", "--require-tty"],
+      platform: "win32",
+      nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    });
 
     assert.equal(shared.launcherPath, join(binDir, "lightrsi.cmd"));
     assert.equal(shared.legacyLauncherPath, join(binDir, "lightmem2.cmd"));
     assert.equal(host.launcherPath, join(binDir, "tokenpilot-codex.cmd"));
+    assert.equal(clean.launcherPath, join(binDir, "lightrsi-clean.cmd"));
     assert.match(await readFile(shared.launcherPath!, "ascii"), /powershell\.exe .*"%~dpn0\.ps1" %\*/i);
     assert.match(await readFile(shared.legacyLauncherPath!, "ascii"), /powershell\.exe .*"%~dpn0\.ps1" %\*/i);
     assert.match(await readFile(host.launcherPath!, "ascii"), /powershell\.exe .*"%~dpn0\.ps1" %\*/i);
+    assert.match(await readFile(clean.launcherPath!, "ascii"), /powershell\.exe .*"%~dpn0\.ps1" %\*/i);
     assert.match(await readFile(join(binDir, "lightrsi.ps1"), "utf8"), /'C:\\Program Files\\nodejs\\node\.exe'.*lightrsi\.js/);
     assert.match(await readFile(join(binDir, "lightmem2.ps1"), "utf8"), /lightrsi\.js/);
     assert.match(await readFile(join(binDir, "tokenpilot-codex.ps1"), "utf8"), /cli\.js/);
+    assert.match(
+      await readFile(join(binDir, "lightrsi-clean.ps1"), "utf8"),
+      /'C:\\Program Files\\nodejs\\node\.exe'.*lightrsi\.js.*'codex' 'clean' '--require-tty' @args/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("fixed CLI alias writes an executable POSIX wrapper with ordered arguments", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lightrsi-posix-clean-alias-"));
+  try {
+    const adapterRoot = join(dir, "adapter with spaces");
+    const distDir = join(adapterRoot, "dist");
+    const binDir = join(dir, "bin with spaces");
+    await mkdir(distDir, { recursive: true });
+    await writeFile(join(distDir, "lightrsi.js"), "#!/usr/bin/env node\n", "utf8");
+
+    const result = await installLightRsiCommandAlias({
+      adapterRoot,
+      binDir,
+      binName: "lightrsi-clean",
+      fixedArgs: ["codex", "clean", "--require-tty"],
+      platform: "linux",
+      nodePath: "/opt/node runtime/bin/node",
+    });
+
+    const wrapper = await readFile(result.binPath, "utf8");
+    assert.match(wrapper, /^#!\/bin\/sh\nexec /);
+    assert.match(wrapper, /'\/opt\/node runtime\/bin\/node'/);
+    assert.match(wrapper, /'codex' 'clean' '--require-tty' "\$@"/);
+    if (process.platform !== "win32") {
+      assert.notEqual((await stat(result.binPath)).mode & 0o111, 0);
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -83,10 +130,15 @@ test("Windows command launchers execute shared and Host CLIs with forwarded argu
     const unicodeNodePath = join(unicodeNodeDir, "node.exe");
     const sharedLog = join(dir, "shared.json");
     const hostLog = join(dir, "host.json");
+    const cleanLog = join(dir, "clean.json");
     await mkdir(distDir, { recursive: true });
     await mkdir(unicodeNodeDir, { recursive: true });
     await copyFile(process.execPath, unicodeNodePath);
-    const fakeCli = 'require("node:fs").writeFileSync(process.env.LIGHTRSI_LAUNCHER_LOG, JSON.stringify(process.argv.slice(2)));\n';
+    const fakeCli = [
+      'require("node:fs").writeFileSync(process.env.LIGHTRSI_LAUNCHER_LOG, JSON.stringify(process.argv.slice(2)));',
+      'process.exit(Number(process.env.LIGHTRSI_LAUNCHER_EXIT_CODE || "0"));',
+      "",
+    ].join("\n");
     await writeFile(join(distDir, "lightrsi.js"), fakeCli, "utf8");
     await writeFile(join(distDir, "cli.js"), fakeCli, "utf8");
 
@@ -100,6 +152,14 @@ test("Windows command launchers execute shared and Host CLIs with forwarded argu
       adapterRoot,
       host: "codex",
       binDir,
+      platform: "win32",
+      nodePath: unicodeNodePath,
+    });
+    const clean = await installLightRsiCommandAlias({
+      adapterRoot,
+      binDir,
+      binName: "lightrsi-clean",
+      fixedArgs: ["codex", "clean", "--require-tty"],
       platform: "win32",
       nodePath: unicodeNodePath,
     });
@@ -127,9 +187,40 @@ test("Windows command launchers execute shared and Host CLIs with forwarded argu
     ], {
       env: { ...process.env, LIGHTRSI_LAUNCHER_LOG: hostLog },
     });
+    await execFileAsync(powershell, [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `& ${quotePowerShell(clean.launcherPath!)} --status plan-1`,
+    ], {
+      env: { ...process.env, LIGHTRSI_LAUNCHER_LOG: cleanLog },
+    });
 
     assert.deepEqual(JSON.parse(await readFile(sharedLog, "utf8")), ["codex", "clean", "--help"]);
     assert.deepEqual(JSON.parse(await readFile(hostLog, "utf8")), ["doctor"]);
+    assert.deepEqual(JSON.parse(await readFile(cleanLog, "utf8")), [
+      "codex",
+      "clean",
+      "--require-tty",
+      "--status",
+      "plan-1",
+    ]);
+
+    await assert.rejects(
+      execFileAsync(powershell, [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `& ${quotePowerShell(clean.launcherPath!)} --status plan-1; exit $LASTEXITCODE`,
+      ], {
+        env: {
+          ...process.env,
+          LIGHTRSI_LAUNCHER_LOG: cleanLog,
+          LIGHTRSI_LAUNCHER_EXIT_CODE: "17",
+        },
+      }),
+      (error: unknown) => (error as { code?: number }).code === 17,
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

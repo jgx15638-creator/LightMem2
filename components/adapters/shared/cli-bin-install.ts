@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, symlink, unlink } from "node:fs/promises";
+import { chmod, copyFile, mkdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { join, resolve, delimiter } from "node:path";
 import { installWindowsNodeCommandLauncher } from "./windows-command-launcher.js";
 
@@ -7,6 +7,45 @@ function cliDistPathFromAdapterRoot(adapterRoot: string): string {
   const bundledPath = resolve(adapterRoot, "dist", "lightrsi.js");
   if (existsSync(bundledPath)) return bundledPath;
   return resolve(adapterRoot, "..", "..", "products", "cli", "dist", "cli.js");
+}
+
+function quoteShellLiteral(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export async function installLightRsiCommandAlias(params: {
+  adapterRoot: string;
+  binDir: string;
+  binName: string;
+  fixedArgs: readonly string[];
+  platform?: NodeJS.Platform;
+  nodePath?: string;
+}): Promise<{
+  binPath: string;
+  launcherPath?: string;
+  cliDistPath: string;
+}> {
+  const cliDistPath = cliDistPathFromAdapterRoot(params.adapterRoot);
+  const binPath = join(params.binDir, params.binName);
+  const command = [
+    quoteShellLiteral(params.nodePath ?? process.execPath),
+    quoteShellLiteral(cliDistPath),
+    ...params.fixedArgs.map(quoteShellLiteral),
+    '"$@"',
+  ].join(" ");
+
+  await mkdir(params.binDir, { recursive: true });
+  await writeFile(binPath, `#!/bin/sh\nexec ${command}\n`, "utf8");
+  await chmod(binPath, 0o755);
+  const launcherPath = await installWindowsNodeCommandLauncher({
+    binPath,
+    targetPath: cliDistPath,
+    platform: params.platform,
+    nodePath: params.nodePath,
+    fixedArgs: params.fixedArgs,
+  });
+
+  return { binPath, launcherPath, cliDistPath };
 }
 
 async function createCliLink(targetPath: string, binPath: string): Promise<void> {
