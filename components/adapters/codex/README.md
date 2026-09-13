@@ -20,6 +20,7 @@ Supported:
 - TokenPilot runtime config in `~/.codex/tokenpilot.json`
 - Codex hook registration in `~/.codex/hooks.json`
 - recovery MCP registration for real `memory_fault_recover`
+- Cleaner MCP registration for Codex form elicitation and exact task selection
 - local Responses proxy lifecycle
 - stable-prefix rewriting
 - request-time reduction
@@ -44,7 +45,7 @@ For a release archive, extract it and run the bundled installer directly:
 node /path/to/package/dist/install-codex.js
 ```
 
-The release archive is self-contained: its hooks, recovery MCP server, `lightrsi` command, and `tokenpilot-codex` command all run from the extracted package directory. Keep that directory in place after installation.
+The release archive is self-contained: its hooks, recovery and Cleaner MCP servers, `lightrsi` command, and `tokenpilot-codex` command all run from the extracted package directory. Keep that directory in place after installation.
 
 For a source checkout, use the one-pass Cleaner installation flow:
 
@@ -79,11 +80,11 @@ The installer will:
 - keep the current active `model_provider`
 - repoint that active provider's `base_url` to the local TokenPilot proxy
 - persist the original upstream provider config into `~/.codex/tokenpilot.json`
-- register a `tokenpilot_memory_fault_recover` MCP server in Codex config
- - write a conservative `startup_timeout_sec` for the recovery MCP server
- - write TokenPilot runtime config
- - start the local TokenPilot proxy immediately
- - register TokenPilot hooks for `SessionStart`, `PreToolUse`, and `PostToolUse`
+- register `tokenpilot_memory_fault_recover` and `lightrsi_cleaner` MCP servers in Codex config
+- write a conservative `startup_timeout_sec` for both MCP servers
+- write TokenPilot runtime config
+- start the local TokenPilot proxy immediately
+- register TokenPilot hooks for `SessionStart`, `PreToolUse`, and `PostToolUse`
 - install constrained Codex command skills under the local Codex skills directory
 - run a post-install MCP startup probe and report degraded mode if recovery MCP is still unavailable
 
@@ -93,14 +94,53 @@ The installed Codex skill bridge currently creates these explicit skills:
 - `lightrsi-report`
 - `lightrsi-doctor`
 - `lightrsi-visual`
-- `lightrsi-clean` (explicit, analysis-only; it never selects or confirms a clean)
+- `lightrsi-clean` (calls the Cleaner MCP tool once and returns its form/result)
 - `lightrsi-clean-status` (read one exact plan receipt)
 - `lightrsi-clean-apply` (schedule only user-supplied task IDs)
 - `lightrsi-clean-cancel` (cancel one exact plan)
 
-These are host entry points, not a separate runtime implementation. They call the existing `lightrsi codex ...` CLI surface underneath.
+`lightrsi-clean` uses `lightrsi_cleaner.lightrsi_clean`. The remaining command skills keep using the existing `lightrsi codex ...` CLI surface.
 
-On Windows the installer also creates `lightrsi.cmd` and
+### Cleaner selection in Codex
+
+For the raw terminal selector, type this shell escape directly in a Codex
+session:
+
+```text
+!lightrsi-clean
+```
+
+The command runs in the current terminal. Up/Down moves only between selectable
+completed tasks, Space toggles the current task, Enter submits the exact checked
+tasks, and `q` or Escape cancels the plan. Ctrl+C interrupts and restores the
+terminal without scheduling a rewrite. Every selectable task starts unchecked,
+while protected tasks are shown for context and cannot receive focus.
+
+Submitting a non-empty selection schedules it for the next Codex Host request;
+the current request only records the selection. Send a harmless follow-up after
+the selector exits to exercise the deferred rewrite.
+
+The installed `$lightrsi-clean` skill is the compatibility path. It analyzes the
+current session and asks Codex to render an MCP form containing the selectable
+completed tasks. Codex owns that form UI and its controls; LightRSI supplies the
+task labels and boolean fields. The MCP form does not promise the raw terminal
+key contract above.
+
+Protected tasks remain visible in the MCP plan text but are absent from its
+selectable form schema. Accepting the form schedules only the checked task IDs
+for the next Host request. Cancelling the form or accepting it with no checked
+tasks schedules nothing.
+
+The MCP tool performs analysis and approval in one call, so task IDs never pass
+through model-authored arguments. `lightrsi-clean-apply`,
+`lightrsi-clean-status`, and `lightrsi-clean-cancel` remain available for the
+explicit plan-based control flow. The equivalent standalone terminal command is:
+
+```bash
+lightrsi-clean
+```
+
+On Windows the installer also creates `lightrsi.cmd`, `lightrsi-clean.cmd`, and
 `tokenpilot-codex.cmd`. If the npm command directory is already on `PATH`, these
 commands are available immediately in a new CMD or PowerShell terminal.
 
@@ -137,6 +177,10 @@ Expected first-run shape:
 - after a few turns, `lightrsi codex report` no longer says `No TokenPilot session stats yet.`
 
 Once installed, Codex can use the real internal recovery tool named `memory_fault_recover` through the registered MCP server. Recovery hints in trimmed payloads are no longer just protocol text.
+
+The same installation registers `lightrsi_cleaner.lightrsi_clean`. The adapter
+doctor reports recovery MCP and Cleaner MCP health separately, so a failure in
+one service does not hide the status of the other.
 
 ### Task-state estimator bridge (PR-B)
 
@@ -304,6 +348,7 @@ cat ~/.codex/tokenpilot.json
 cat ~/.codex/hooks.json
 rg "model_provider|base_url" ~/.codex/config.toml
 rg "mcp_servers.tokenpilot_memory_fault_recover" ~/.codex/config.toml
+rg "mcp_servers.lightrsi_cleaner" ~/.codex/config.toml
 npm --prefix components/adapters/codex run doctor:codex
 tokenpilot-codex status
 ```

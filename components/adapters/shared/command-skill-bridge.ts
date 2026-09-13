@@ -98,6 +98,22 @@ function skillMarkdown(params: {
   cliCommand: string;
 }): string {
   const commandText = `lightrsi ${params.host} ${params.spec.commandArgs.join(" ")}`;
+  const codexCleanerAnalysisBody = [
+    "Analyze and schedule a LightRSI Cleaner selection through the Codex MCP form.",
+    "For exact raw terminal controls, the user must type the user-entered `!lightrsi-clean` command; it provides Up/Down, Space, Enter, and `q` directly in the current terminal.",
+    "The MCP form remains the compatibility path and may use controls chosen by the Codex client.",
+    "",
+    "Execution rules:",
+    "1. Call `lightrsi_cleaner.lightrsi_clean` exactly once with an empty input object.",
+    "2. Let the MCP tool show the complete plan and let Codex collect the user's selection.",
+    "3. Return the tool result to the user, including any cancellation or error result.",
+    "4. Do not run a shell command or invoke the LightRSI CLI as part of this skill.",
+    "",
+    "Safety rules:",
+    "- Do not supply, infer, or rewrite plan IDs, task IDs, item IDs, item digests, or deletion ranges.",
+    "- Do not call the Cleaner apply, status, or cancel command after the MCP tool returns.",
+    "- The selection accepted in the Codex form is the only selection authorized by this invocation.",
+  ].join("\n");
   const cleanerBodies = {
     cleaner_analysis: [
       `Run the local LightRSI Cleaner analysis for ${params.host} and return the output.`,
@@ -186,7 +202,9 @@ function skillMarkdown(params: {
       "- Never add any CLI arguments beyond the documented `--cancel <plan-id>` form.",
     ].join("\n"),
   } as const;
-  const body = params.spec.mode === "read_only"
+  const body = params.style === "codex" && params.spec.mode === "cleaner_analysis"
+    ? codexCleanerAnalysisBody
+    : params.spec.mode === "read_only"
     ? [
       `Run the local LightRSI command surface for ${params.host} and return the output.`,
       "",
@@ -200,7 +218,7 @@ function skillMarkdown(params: {
       "",
       "Do not modify configuration in this skill. This bridge is read-only.",
     ].join("\n")
-    : cleanerBodies[params.spec.mode];
+      : cleanerBodies[params.spec.mode];
 
   if (params.style === "claude") {
     return [

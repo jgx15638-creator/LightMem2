@@ -47,19 +47,30 @@ for (const [host, style] of [
         ],
       );
       const skillRaw = await readFile(join(skillsDir, "lightrsi-clean", "SKILL.md"), "utf8");
-      assert.match(skillRaw, new RegExp(`^   lightrsi ${host} clean$`, "m"));
-      assert.doesNotMatch(skillRaw, new RegExp(`^   lightrsi ${host} clean\\s+--`, "m"));
-      assert.match(skillRaw, /Never choose task IDs, item IDs, item digests, or deletion ranges/);
-      assert.match(skillRaw, /Never answer the confirmation prompt or run a follow-up command/);
       const fallbackLine = skillRaw.match(/^   (".*lightrsi\.js".*)$/m)?.[1];
       const nodeFallbackLine = skillRaw.match(/^   (node ".*lightrsi\.js".*)$/m)?.[1];
       assert.equal(fallbackLine, undefined);
-      assert.ok(nodeFallbackLine, "cleaner skill fallback command missing");
-      const command = parseJsonQuotedCommand(nodeFallbackLine);
-      await execFileAsync(process.execPath, command, {
-        env: { ...process.env, LIGHTRSI_FAKE_CLI_LOG: invocationPath },
-      });
-      assert.deepEqual(JSON.parse(await readFile(invocationPath, "utf8")), [host, "clean"]);
+      if (style === "codex") {
+        assert.match(skillRaw, /`lightrsi_cleaner\.lightrsi_clean`/);
+        assert.match(skillRaw, /exactly once/i);
+        assert.match(skillRaw, /do not run (?:a )?shell command/i);
+        assert.match(skillRaw, /user-entered `!lightrsi-clean`/i);
+        assert.match(skillRaw, /Up\/Down, Space, Enter, and `q`/);
+        assert.match(skillRaw, /MCP form remains/i);
+        assert.doesNotMatch(skillRaw, /MCP form uses Up\/Down, Space, Enter, and `q`/i);
+        assert.equal(nodeFallbackLine, undefined);
+      } else {
+        assert.match(skillRaw, new RegExp(`^   lightrsi ${host} clean$`, "m"));
+        assert.doesNotMatch(skillRaw, new RegExp(`^   lightrsi ${host} clean\\s+--`, "m"));
+        assert.match(skillRaw, /Never choose task IDs, item IDs, item digests, or deletion ranges/);
+        assert.match(skillRaw, /Never answer the confirmation prompt or run a follow-up command/);
+        assert.ok(nodeFallbackLine, "cleaner skill fallback command missing");
+        const command = parseJsonQuotedCommand(nodeFallbackLine);
+        await execFileAsync(process.execPath, command, {
+          env: { ...process.env, LIGHTRSI_FAKE_CLI_LOG: invocationPath },
+        });
+        assert.deepEqual(JSON.parse(await readFile(invocationPath, "utf8")), [host, "clean"]);
+      }
 
       const controlSkills = [
         {
