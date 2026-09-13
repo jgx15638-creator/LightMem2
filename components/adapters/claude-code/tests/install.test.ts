@@ -116,6 +116,9 @@ test("installClaudeCodeTokenPilot writes settings, MCP config, and backups exist
     const allowRegularFile = process.platform === "win32";
     await assertInstalledCliLink(result.cliBinPath, /products[\/\\]cli[\/\\]dist[\/\\]cli\.js$/, allowRegularFile);
     await assertInstalledCliLink(result.hostCliBinPath!, /adapters[\/\\]claude-code[\/\\]dist[\/\\]cli\.js$/, allowRegularFile);
+    await assert.rejects(stat(join(cliBinDir, "lightrsi-clean")), { code: "ENOENT" });
+    await assert.rejects(stat(join(cliBinDir, "lightrsi-clean.cmd")), { code: "ENOENT" });
+    await assert.rejects(stat(join(cliBinDir, "lightrsi-clean.ps1")), { code: "ENOENT" });
     assert.match(result.expectedHookCommand, /hooks-handler\.(js|ts)/);
     assert.ok(result.expectedMcpArgs.length > 0);
     assert.equal(result.expectedMcpStartupTimeoutSec, 90);
@@ -131,6 +134,7 @@ test("installClaudeCodeTokenPilot writes settings, MCP config, and backups exist
     assert.match(skillRaw, /disable-model-invocation:\s*true/);
     const cleanSkillRaw = await readFile(join(result.commandSkillsDir, "lightrsi-clean", "SKILL.md"), "utf8");
     assert.match(cleanSkillRaw, /^   lightrsi claude-code clean$/m);
+    assert.match(cleanSkillRaw, /^   node .* "claude-code" "clean"$/m);
     assert.doesNotMatch(cleanSkillRaw, /^   lightrsi claude-code clean\s+--/m);
     assert.match(cleanSkillRaw, /Never choose task IDs, item IDs, item digests, or deletion ranges/);
     assert.match(cleanSkillRaw, /Never add `--plan`, `--select`, `--status`, or `--cancel`/);

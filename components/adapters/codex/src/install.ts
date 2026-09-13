@@ -28,16 +28,32 @@ import {
   defaultCodexSkillBridgeDir,
   installCommandSkillBridge,
 } from "../../shared/command-skill-bridge.js";
-import { installLightRsiCliBin } from "../../shared/cli-bin-install.js";
+import {
+  installLightRsiCliBin,
+  installLightRsiCommandAlias,
+} from "../../shared/cli-bin-install.js";
 import { rememberCliHostPathOverrides } from "../../shared/cli-context.js";
 import { installHostCliBin } from "../../shared/host-cli-bin-install.js";
 import { installWindowsNodeCommandLauncher } from "../../shared/windows-command-launcher.js";
+import { CODEX_CLEANER_MCP_SERVER_NAME } from "./context-cleaner/mcp-selection.js";
 
 function quoteToml(value: string): string {
   return JSON.stringify(value);
 }
 
 const LEGACY_OPENAI_PROXY_PROVIDER = "tokenpilot-openai";
+const CODEX_CLEANER_FORWARDED_ENV_VARS = [
+  "LIGHTRSI_TASK_STATE_ESTIMATOR_API_KEY",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "all_proxy",
+  "NODE_USE_ENV_PROXY",
+];
 
 function builtInCodexProviderConfig(providerName: string): CodexProviderConfig | undefined {
   if (providerName !== "openai") return undefined;
@@ -147,6 +163,7 @@ function upsertMcpServerSection(text: string, params: {
   command: string;
   args: string[];
   env: Record<string, string>;
+  envVars?: string[];
   startupTimeoutSec?: number;
 }): string {
   const escape = (value: string) => JSON.stringify(value);
@@ -157,6 +174,9 @@ function upsertMcpServerSection(text: string, params: {
   ];
   if (params.args.length > 0) {
     lines.push(`args = [${params.args.map((value) => escape(value)).join(", ")}]`);
+  }
+  if ((params.envVars?.length ?? 0) > 0) {
+    lines.push(`env_vars = [${params.envVars!.map((value) => escape(value)).join(", ")}]`);
   }
   if (typeof params.startupTimeoutSec === "number" && Number.isFinite(params.startupTimeoutSec) && params.startupTimeoutSec > 0) {
     lines.push(`startup_timeout_sec = ${Math.trunc(params.startupTimeoutSec)}`);
@@ -328,6 +348,57 @@ export function resolveCodexMcpServerSpecForProbe(stateDir: string): TokenPilotM
     : fallback;
 }
 
+function codexCleanerMcpServerSpec(
+  entryPath: string,
+  stateDir: string,
+  tokenPilotConfigPath: string,
+): TokenPilotMcpServerSpec {
+  return {
+    serverName: CODEX_CLEANER_MCP_SERVER_NAME,
+    command: process.execPath,
+    args: [entryPath],
+    env: {
+      TOKENPILOT_STATE_DIR: stateDir,
+      TOKENPILOT_CODEX_CONFIG: tokenPilotConfigPath,
+    },
+    envVars: CODEX_CLEANER_FORWARDED_ENV_VARS,
+    entryPath,
+  };
+}
+
+export function resolveCodexCleanerMcpServerSpecForInstall(
+  stateDir: string,
+  tokenPilotConfigPath = defaultTokenPilotConfigPath(),
+): TokenPilotMcpServerSpec {
+  return codexCleanerMcpServerSpec(
+    join(adapterRootFromHere(), "dist", "cleaner-mcp-server.js"),
+    stateDir,
+    tokenPilotConfigPath,
+  );
+}
+
+export function resolveCodexCleanerMcpServerSpecForProbe(
+  stateDir: string,
+  tokenPilotConfigPath = defaultTokenPilotConfigPath(),
+): TokenPilotMcpServerSpec {
+  const adapterRoot = adapterRootFromHere();
+  const distEntryPath = join(adapterRoot, "dist", "cleaner-mcp-server.js");
+  const srcEntryPath = join(adapterRoot, "src", "cleaner-mcp-server.ts");
+  const runningViaTsx = process.execArgv.includes("--import")
+    && process.execArgv.some((value) => value.includes("tsx"));
+  if (runningViaTsx && existsSync(srcEntryPath)) {
+    return {
+      ...codexCleanerMcpServerSpec(srcEntryPath, stateDir, tokenPilotConfigPath),
+      args: ["--import", "tsx", srcEntryPath],
+    };
+  }
+  return codexCleanerMcpServerSpec(
+    existsSync(distEntryPath) ? distEntryPath : srcEntryPath,
+    stateDir,
+    tokenPilotConfigPath,
+  );
+}
+
 function asHookConfig(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -417,9 +488,12 @@ export async function installCodexTokenPilot(params?: {
   baseUrl: string;
   hooksInstalled: boolean;
   mcpServerName: string;
+  cleanerMcpServerName: string;
   expectedHookCommand: string;
   expectedMcpCommand: string;
   expectedMcpArgs: string[];
+  expectedCleanerMcpCommand: string;
+  expectedCleanerMcpArgs: string[];
   expectedMcpStartupTimeoutSec: number;
   commandSkillsDir: string;
   commandSkillNames: string[];
@@ -430,7 +504,15 @@ export async function installCodexTokenPilot(params?: {
   cliBinDirOnPath: boolean;
   hostCliBinPath?: string;
   hostCliLauncherPath?: string;
+  cleanCliBinPath?: string;
+  cleanCliLauncherPath?: string;
   mcpProbe: {
+    ok: boolean;
+    detail: string;
+    timedOut: boolean;
+    degraded: boolean;
+  };
+  cleanerMcpProbe: {
     ok: boolean;
     detail: string;
     timedOut: boolean;
@@ -501,6 +583,14 @@ export async function installCodexTokenPilot(params?: {
   const baseUrl = `http://127.0.0.1:${tokenPilotConfig.proxyPort}/v1`;
   const mcpServer = resolveCodexMcpServerSpecForInstall(tokenPilotConfig.stateDir);
   const mcpProbeServer = resolveCodexMcpServerSpecForProbe(tokenPilotConfig.stateDir);
+  const cleanerMcpServer = resolveCodexCleanerMcpServerSpecForInstall(
+    tokenPilotConfig.stateDir,
+    tokenPilotConfigPath,
+  );
+  const cleanerMcpProbeServer = resolveCodexCleanerMcpServerSpecForProbe(
+    tokenPilotConfig.stateDir,
+    tokenPilotConfigPath,
+  );
 
   await mkdir(dirname(codexConfigPath), { recursive: true });
   const existing = existsSync(codexConfigPath) ? await readFile(codexConfigPath, "utf8") : "";
@@ -527,6 +617,15 @@ export async function installCodexTokenPilot(params?: {
     command: mcpServer.command,
     args: mcpServer.args,
     env: mcpServer.env,
+    envVars: mcpServer.envVars,
+    startupTimeoutSec: DEFAULT_TOKENPILOT_MCP_STARTUP_TIMEOUT_SEC,
+  });
+  next = upsertMcpServerSection(next, {
+    serverName: cleanerMcpServer.serverName,
+    command: cleanerMcpServer.command,
+    args: cleanerMcpServer.args,
+    env: cleanerMcpServer.env,
+    envVars: cleanerMcpServer.envVars,
     startupTimeoutSec: DEFAULT_TOKENPILOT_MCP_STARTUP_TIMEOUT_SEC,
   });
   await writeFile(codexConfigPath, next.endsWith("\n") ? next : `${next}\n`, "utf8");
@@ -557,6 +656,15 @@ export async function installCodexTokenPilot(params?: {
       platform: params?.platform,
     })
     : undefined;
+  const cleanCliBin = cliBin.installed
+    ? await installLightRsiCommandAlias({
+      adapterRoot: adapterRootFromHere(),
+      binDir: cliBin.binDir,
+      binName: "lightrsi-clean",
+      fixedArgs: ["codex", "clean", "--require-tty"],
+      platform: params?.platform,
+    })
+    : undefined;
   await rememberCliHostPathOverrides("codex", {
     tokenPilotConfigPath,
     hostConfigPath: codexConfigPath,
@@ -575,6 +683,18 @@ export async function installCodexTokenPilot(params?: {
       clientName: "tokenpilot-codex-install",
       clientVersion: LIGHTRSI_VERSION,
     });
+  const cleanerMcpProbeResult = params?.probeMcp === false
+    ? {
+      ok: false,
+      timedOut: false,
+      degraded: true,
+      detail: "Cleaner MCP startup probe skipped by installer options",
+    }
+    : await probeTokenPilotMcpServer(cleanerMcpProbeServer, {
+      timeoutMs: DEFAULT_TOKENPILOT_MCP_INSTALL_PROBE_TIMEOUT_MS,
+      clientName: "lightrsi-codex-cleaner-install",
+      clientVersion: LIGHTRSI_VERSION,
+    });
   return {
     codexConfigPath,
     tokenPilotConfigPath,
@@ -584,9 +704,12 @@ export async function installCodexTokenPilot(params?: {
     baseUrl,
     hooksInstalled,
     mcpServerName: mcpServer.serverName,
+    cleanerMcpServerName: cleanerMcpServer.serverName,
     expectedHookCommand,
     expectedMcpCommand: mcpServer.command,
     expectedMcpArgs: mcpServer.args,
+    expectedCleanerMcpCommand: cleanerMcpServer.command,
+    expectedCleanerMcpArgs: cleanerMcpServer.args,
     expectedMcpStartupTimeoutSec: DEFAULT_TOKENPILOT_MCP_STARTUP_TIMEOUT_SEC,
     commandSkillsDir: commandSkillBridge.skillsDir,
     commandSkillNames: commandSkillBridge.skillNames,
@@ -597,9 +720,15 @@ export async function installCodexTokenPilot(params?: {
     cliBinDirOnPath: cliBin.binDirOnPath,
     hostCliBinPath: hostCliBin?.binPath,
     hostCliLauncherPath: hostCliBin?.launcherPath,
+    cleanCliBinPath: cleanCliBin?.binPath,
+    cleanCliLauncherPath: cleanCliBin?.launcherPath,
     mcpProbe: {
       ...mcpProbeResult,
       degraded: !mcpProbeResult.ok,
+    },
+    cleanerMcpProbe: {
+      ...cleanerMcpProbeResult,
+      degraded: !cleanerMcpProbeResult.ok,
     },
   };
 }

@@ -16,6 +16,7 @@ import {
   formatCodexDoctorReport,
   inspectCodexDoctor,
 } from "../src/doctor.js";
+import { resolveCodexCleanerMcpServerSpecForInstall } from "../src/install.js";
 import {
   appendCodexRebaseCapability,
   CODEX_REBASE_API_VERSION,
@@ -80,6 +81,49 @@ test("inspectCodexDoctor reports missing provider and hooks honestly", async () 
     assert.equal(report.mcpCommandMatches, false);
     assert.equal(report.mcpArgsMatch, false);
     assert.equal(report.taskStateEstimator?.status, "disabled");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("inspectCodexDoctor distinguishes the Cleaner alias from its Windows launcher", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lightrsi-codex-doctor-clean-alias-"));
+  try {
+    const proxyPort = await reserveUnusedPort();
+    const codexConfigPath = join(dir, "config.toml");
+    const hooksConfigPath = join(dir, "hooks.json");
+    const tokenPilotConfigPath = join(dir, "tokenpilot.json");
+    const cliBinDir = join(dir, "bin");
+    await mkdir(join(dir, "state"), { recursive: true });
+    await mkdir(cliBinDir, { recursive: true });
+    await writeFile(codexConfigPath, "model_provider = \"OpenAI\"\n", "utf8");
+    await writeFile(hooksConfigPath, JSON.stringify({ hooks: {} }), "utf8");
+
+    const inspect = () => inspectCodexDoctor({
+      config: normalizeTokenPilotCodexConfig({ stateDir: join(dir, "state"), proxyPort }),
+      configPath: codexConfigPath,
+      hooksConfigPath,
+      tokenPilotConfigPath,
+      cliBinDir,
+      platform: "win32",
+    });
+
+    const missing = await inspect();
+    assert.equal(missing.cleanCliInstalled, false);
+    assert.equal(missing.cleanCliLauncherInstalled, false);
+
+    await writeFile(join(cliBinDir, "lightrsi-clean"), "#!/bin/sh\n", "utf8");
+    const missingLauncher = await inspect();
+    assert.equal(missingLauncher.cleanCliInstalled, true);
+    assert.equal(missingLauncher.cleanCliLauncherInstalled, false);
+
+    await writeFile(join(cliBinDir, "lightrsi-clean.cmd"), "@echo off\r\n", "ascii");
+    const installed = await inspect();
+    assert.equal(installed.cleanCliInstalled, true);
+    assert.equal(installed.cleanCliLauncherInstalled, true);
+    const text = formatCodexDoctorReport(installed);
+    assert.match(text, /Cleaner TTY command installed: yes/);
+    assert.match(text, /Cleaner TTY Windows launcher installed: yes/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -195,6 +239,7 @@ test("doctor diagnostics summarize provider and MCP config without secret values
     commandConfigured: true,
     argsCount: 3,
     envKeys: ["SERVICE_API_KEY", "TOKENPILOT_STATE_DIR"],
+    forwardedEnvKeys: [],
     startupTimeoutSec: 90,
   });
   assert.doesNotMatch(serialized, /provider-password|query-secret|provider-api-secret|mcp-argument-secret|mcp-env-secret/);
@@ -275,6 +320,15 @@ test("doctor-codex script exposes estimator diagnostics without serializing conf
       'SERVICE_API_KEY = "mcp-env-secret"',
       `TOKENPILOT_STATE_DIR = ${JSON.stringify(stateDir)}`,
       "",
+      "[mcp_servers.lightrsi_cleaner]",
+      `command = ${JSON.stringify(process.execPath)}`,
+      'args = ["cleaner-mcp-server.js"]',
+      'env_vars = ["LIGHTRSI_TASK_STATE_ESTIMATOR_API_KEY"]',
+      "startup_timeout_sec = 90",
+      "",
+      "[mcp_servers.lightrsi_cleaner.env]",
+      `TOKENPILOT_STATE_DIR = ${JSON.stringify(stateDir)}`,
+      "",
     ].join("\n"), "utf8");
     await writeFile(hooksConfigPath, JSON.stringify({ hooks: {} }), "utf8");
     await writeFile(tokenPilotConfigPath, JSON.stringify({
@@ -316,6 +370,10 @@ test("doctor-codex script exposes estimator diagnostics without serializing conf
     assert.equal(output.upstream.apiKeyConfigured, true);
     assert.equal(output.recoveryMcp.argsCount, 3);
     assert.deepEqual(output.recoveryMcp.envKeys, ["SERVICE_API_KEY", "TOKENPILOT_STATE_DIR"]);
+    assert.equal(output.cleanerMcp.configured, true);
+    assert.equal(output.cleanerMcp.argsCount, 1);
+    assert.deepEqual(output.cleanerMcp.envKeys, ["TOKENPILOT_STATE_DIR"]);
+    assert.deepEqual(output.cleanerMcp.forwardedEnvKeys, ["LIGHTRSI_TASK_STATE_ESTIMATOR_API_KEY"]);
     assert.doesNotMatch(
       serialized,
       /tokenpilot-provider-secret|url-password|query-secret|upstream-provider-secret|mcp-argument-secret|mcp-env-secret|estimator-script-secret|Authorization/i,
@@ -372,6 +430,8 @@ test("inspectCodexDoctor detects installed recovery MCP entry", async () => {
     const codexConfigPath = join(dir, "config.toml");
     const hooksConfigPath = join(dir, "hooks.json");
     const tokenPilotConfigPath = join(dir, "tokenpilot.json");
+    const stateDir = join(dir, "state");
+    const cleanerMcp = resolveCodexCleanerMcpServerSpecForInstall(stateDir, tokenPilotConfigPath);
 
     await writeFile(codexConfigPath, [
       "model_provider = \"tokenpilot\"",
@@ -388,15 +448,25 @@ test("inspectCodexDoctor detects installed recovery MCP entry", async () => {
       "startup_timeout_sec = 90",
       "",
       "[mcp_servers.tokenpilot_memory_fault_recover.env]",
-      `TOKENPILOT_STATE_DIR = ${JSON.stringify(join(dir, "state"))}`,
+      `TOKENPILOT_STATE_DIR = ${JSON.stringify(stateDir)}`,
+      "",
+      "[mcp_servers.lightrsi_cleaner]",
+      `command = ${JSON.stringify(cleanerMcp.command)}`,
+      `args = [${cleanerMcp.args.map((value) => JSON.stringify(value)).join(", ")}]`,
+      `env_vars = [${cleanerMcp.envVars?.map((value) => JSON.stringify(value)).join(", ")}]`,
+      "startup_timeout_sec = 90",
+      "",
+      "[mcp_servers.lightrsi_cleaner.env]",
+      `TOKENPILOT_STATE_DIR = ${JSON.stringify(stateDir)}`,
+      `TOKENPILOT_CODEX_CONFIG = ${JSON.stringify(tokenPilotConfigPath)}`,
       "",
     ].join("\n"), "utf8");
     await writeFile(hooksConfigPath, JSON.stringify({ hooks: {} }, null, 2), "utf8");
-    await mkdir(join(dir, "state"), { recursive: true });
+    await mkdir(stateDir, { recursive: true });
 
     const report = await inspectCodexDoctor({
       config: normalizeTokenPilotCodexConfig({
-        stateDir: join(dir, "state"),
+        stateDir,
         proxyPort,
       }),
       configPath: codexConfigPath,
@@ -410,6 +480,13 @@ test("inspectCodexDoctor detects installed recovery MCP entry", async () => {
     assert.equal(report.mcpCommandMatches, true);
     assert.equal(report.mcpArgsMatch, false);
     assert.equal(report.mcpStartupTimeoutSecMatches, true);
+    assert.equal(report.cleanerMcpInstalled, true);
+    assert.equal(report.cleanerMcpStateDirMatches, true);
+    assert.equal(report.cleanerMcpCommandMatches, true);
+    assert.equal(report.cleanerMcpArgsMatch, true);
+    assert.equal(report.cleanerMcpStartupTimeoutSecMatches, true);
+    assert.equal(report.cleanerMcpHealthy, true);
+    assert.match(formatCodexDoctorReport(report), /Cleaner MCP healthy: yes/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
