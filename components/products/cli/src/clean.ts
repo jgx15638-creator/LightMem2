@@ -44,10 +44,10 @@ export function resolveCleanCommandBackend(params: {
 }
 
 type ParsedCleanArgs =
-  | { action: "analyze"; sessionId?: string }
-  | { action: "approve"; planId: string; selectedTaskIds: string[] }
-  | { action: "status"; planId: string }
-  | { action: "cancel"; planId: string };
+  | { action: "analyze"; sessionId?: string; requireTty: boolean }
+  | { action: "approve"; planId: string; selectedTaskIds: string[]; requireTty: boolean }
+  | { action: "status"; planId: string; requireTty: boolean }
+  | { action: "cancel"; planId: string; requireTty: boolean };
 
 export function formatCleanUsage(): string {
   return [
@@ -59,8 +59,10 @@ export function formatCleanUsage(): string {
   ].join("\n");
 }
 
-function parseCleanArgs(args: string[]): ParsedCleanArgs {
-  if (args.length === 0) return { action: "analyze" };
+function parseCleanArgs(inputArgs: string[]): ParsedCleanArgs {
+  const requireTty = inputArgs[0] === "--require-tty";
+  const args = requireTty ? inputArgs.slice(1) : inputArgs;
+  if (args.length === 0) return { action: "analyze", requireTty };
   if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
     throw new Error("clean_help");
   }
@@ -72,13 +74,13 @@ function parseCleanArgs(args: string[]): ParsedCleanArgs {
   };
 
   if (args.length === 2 && args[0] === "--session") {
-    return { action: "analyze", sessionId: valueAt(1, "clean_session_id_missing") };
+    return { action: "analyze", sessionId: valueAt(1, "clean_session_id_missing"), requireTty };
   }
   if (args.length === 2 && args[0] === "--status") {
-    return { action: "status", planId: valueAt(1, "clean_plan_id_missing") };
+    return { action: "status", planId: valueAt(1, "clean_plan_id_missing"), requireTty };
   }
   if (args.length === 2 && args[0] === "--cancel") {
-    return { action: "cancel", planId: valueAt(1, "clean_plan_id_missing") };
+    return { action: "cancel", planId: valueAt(1, "clean_plan_id_missing"), requireTty };
   }
   if (args.length === 4 && args[0] === "--plan" && args[2] === "--select") {
     const selectedTaskIds = valueAt(3, "clean_selection_missing").split(",").map((taskId) => taskId.trim());
@@ -87,6 +89,7 @@ function parseCleanArgs(args: string[]): ParsedCleanArgs {
       action: "approve",
       planId: valueAt(1, "clean_plan_id_missing"),
       selectedTaskIds,
+      requireTty,
     };
   }
   throw new Error("clean_argument_syntax");
@@ -160,11 +163,12 @@ export async function handleCleanCommand(params: {
     return { text: await approveSelection(params.backend, plan, parsed.selectedTaskIds) };
   }
 
+  const interactive = params.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (parsed.requireTty && !interactive) throw new Error("clean_interactive_tty_required");
   const sessionId = params.sessionId?.trim() || parsed.sessionId;
   if (!sessionId) throw new Error("clean_session_id_missing");
   const plan = await params.backend.analyze(sessionId);
   const rendered = renderCleanPlan(plan);
-  const interactive = params.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (!interactive) {
     return { text: renderNonInteractiveAnalysis(plan, rendered) };
   }
