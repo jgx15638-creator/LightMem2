@@ -2,7 +2,40 @@ import { emitKeypressEvents } from "node:readline";
 
 import { estimateCleanSelection, renderCleanPlan, type CleanPlanView } from "./clean-renderer.js";
 
-export type CleanTaskPrompt = (plan: CleanPlanView) => Promise<string[] | undefined>;
+type CleanPromptKey = { name?: string; ctrl?: boolean };
+type CleanPromptKeypressHandler = (value: string, key: CleanPromptKey) => void;
+
+export type CleanTaskPromptResult =
+  | { action: "submit"; selectedTaskIds: string[] }
+  | { action: "cancel" }
+  | { action: "interrupt" };
+
+export type CleanTaskPrompt = (plan: CleanPlanView) => Promise<CleanTaskPromptResult>;
+
+export type CleanPromptTerminal = {
+  input: {
+    isTTY?: boolean;
+    isRaw?: boolean;
+    setRawMode?(value: boolean): unknown;
+    resume(): unknown;
+    pause(): unknown;
+    on(event: "keypress", listener: CleanPromptKeypressHandler): unknown;
+    off(event: "keypress", listener: CleanPromptKeypressHandler): unknown;
+  };
+  output: {
+    isTTY?: boolean;
+    write(value: string): unknown;
+  };
+  emitKeypressEvents(input: CleanPromptTerminal["input"]): void;
+};
+
+const processTerminal: CleanPromptTerminal = {
+  input: process.stdin,
+  output: process.stdout,
+  emitKeypressEvents(input) {
+    emitKeypressEvents(input as NodeJS.ReadableStream);
+  },
+};
 
 export function createInitialCleanPromptState(plan: CleanPlanView): {
   selectedTaskIds: string[];
@@ -14,64 +47,60 @@ export function createInitialCleanPromptState(plan: CleanPlanView): {
   };
 }
 
-export async function promptForCleanTasks(plan: CleanPlanView): Promise<string[] | undefined> {
+export async function promptForCleanTasks(
+  plan: CleanPlanView,
+  terminal: CleanPromptTerminal = processTerminal,
+): Promise<CleanTaskPromptResult> {
   const choices = plan.tasks.filter((task) => task.selectable);
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
+  if (!terminal.input.isTTY || !terminal.output.isTTY) return { action: "cancel" };
 
   const initial = createInitialCleanPromptState(plan);
-  process.stdout.write(`${initial.text}\n\n`);
-  if (choices.length === 0) return [];
+  terminal.output.write(`${initial.text}\n\n`);
+  if (choices.length === 0) return { action: "submit", selectedTaskIds: [] };
 
   const selected = new Set(initial.selectedTaskIds);
   let cursor = 0;
-  emitKeypressEvents(process.stdin);
+  terminal.emitKeypressEvents(terminal.input);
   const render = (first: boolean) => {
-    if (!first) process.stdout.write(`\u001b[${choices.length + 2}A`);
-    process.stdout.write("Select tasks to clean (up/down move, space toggle, enter confirm, q cancel)\n");
+    if (!first) terminal.output.write(`\u001b[${choices.length + 2}A`);
+    terminal.output.write("Select tasks to clean (Up/Down move, Space toggle, Enter submit, q cancel)\n");
     for (const [index, task] of choices.entries()) {
       const marker = index === cursor ? ">" : " ";
       const checked = selected.has(task.taskId) ? "x" : " ";
-      process.stdout.write(`${marker} [${checked}] ${task.taskId} - ${task.label}\u001b[K\n`);
+      terminal.output.write(`${marker} [${checked}] ${task.taskId} - ${task.label}\u001b[K\n`);
     }
     const estimate = estimateCleanSelection(plan, [...selected]);
     const estimateText = estimate.tokens === null ? `${estimate.chars} chars` : `${estimate.tokens} tok`;
-    process.stdout.write(`Selected estimated release: ${estimateText}\u001b[K\n`);
+    terminal.output.write(`Selected estimated release: ${estimateText}\u001b[K\n`);
   };
 
-  return new Promise<string[] | undefined>((resolve, reject) => {
-    const previousRaw = process.stdin.isRaw;
-    let confirming = false;
+  return new Promise<CleanTaskPromptResult>((resolve) => {
+    const previousRaw = terminal.input.isRaw;
+    let settled = false;
     const cleanup = () => {
-      process.stdin.off("keypress", onKeypress);
-      process.stdin.setRawMode?.(Boolean(previousRaw));
-      process.stdin.pause();
-      if (confirming) process.stdout.write("\n");
-      process.stdout.write("\u001b[?25h");
+      terminal.input.off("keypress", onKeypress);
+      terminal.input.setRawMode?.(Boolean(previousRaw));
+      terminal.input.pause();
+      terminal.output.write("\u001b[?25h");
     };
-    const finish = (value: string[] | undefined) => {
+    const finish = (value: CleanTaskPromptResult) => {
+      if (settled) return;
+      settled = true;
       cleanup();
       resolve(value);
     };
-    const onKeypress = (_value: string, key: { name?: string; ctrl?: boolean }) => {
+    const onKeypress: CleanPromptKeypressHandler = (_value, key) => {
       if (key.ctrl && key.name === "c") {
-        cleanup();
-        reject(new Error("clean_selection_interrupted"));
-        return;
+        return finish({ action: "interrupt" });
       }
-      if (confirming) {
-        if (key.name === "y") return finish(
-          choices.filter((task) => selected.has(task.taskId)).map((task) => task.taskId),
-        );
-        if (key.name === "return" || key.name === "enter" || key.name === "n"
-          || key.name === "escape" || key.name === "q") return finish(undefined);
-        return;
-      }
-      if (key.name === "q" || key.name === "escape") return finish(undefined);
+      if (key.name === "q" || key.name === "escape") return finish({ action: "cancel" });
       if (key.name === "return" || key.name === "enter") {
-        if (selected.size === 0) return finish([]);
-        confirming = true;
-        process.stdout.write("Confirm clean? [y/N] ");
-        return;
+        return finish({
+          action: "submit",
+          selectedTaskIds: choices
+            .filter((task) => selected.has(task.taskId))
+            .map((task) => task.taskId),
+        });
       }
       if (key.name === "up") cursor = (cursor + choices.length - 1) % choices.length;
       else if (key.name === "down") cursor = (cursor + 1) % choices.length;
@@ -82,10 +111,10 @@ export async function promptForCleanTasks(plan: CleanPlanView): Promise<string[]
       } else return;
       render(false);
     };
-    process.stdin.setRawMode?.(true);
-    process.stdin.resume();
-    process.stdin.on("keypress", onKeypress);
-    process.stdout.write("\u001b[?25l");
+    terminal.input.setRawMode?.(true);
+    terminal.input.resume();
+    terminal.input.on("keypress", onKeypress);
+    terminal.output.write("\u001b[?25l");
     render(true);
   });
 }

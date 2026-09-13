@@ -46,11 +46,55 @@ test("interactive clean analyzes, prompts by task id, and approves selection", a
   const calls: string[] = [];
   const result = await handleCleanCommand({
     args: [], sessionId: "session-1", backend: backend(calls), interactive: true,
-    async prompt() { return ["task-a"]; },
+    async prompt() { return { action: "submit", selectedTaskIds: ["task-a"] }; },
   });
   assert.deepEqual(calls, ["analyze:session-1", "approve:plan-1:task-a"]);
   assert.match(result.text, /Context clean scheduled/);
   assert.match(result.text, /next Host request/);
+});
+
+test("interactive cancellation persists a cancelled receipt", async () => {
+  const calls: string[] = [];
+  const result = await handleCleanCommand({
+    args: [],
+    sessionId: "session-1",
+    backend: backend(calls),
+    interactive: true,
+    async prompt() { return { action: "cancel" }; },
+  });
+
+  assert.deepEqual(calls, ["analyze:session-1", "cancel:plan-1"]);
+  assert.match(result.text, /Context clean cancelled/);
+});
+
+test("interactive interruption cancels before returning an error", async () => {
+  const calls: string[] = [];
+  await assert.rejects(
+    handleCleanCommand({
+      args: [],
+      sessionId: "session-1",
+      backend: backend(calls),
+      interactive: true,
+      async prompt() { return { action: "interrupt" }; },
+    }),
+    /clean_selection_interrupted/,
+  );
+
+  assert.deepEqual(calls, ["analyze:session-1", "cancel:plan-1"]);
+});
+
+test("interactive empty submission schedules and cancels nothing", async () => {
+  const calls: string[] = [];
+  const result = await handleCleanCommand({
+    args: [],
+    sessionId: "session-1",
+    backend: backend(calls),
+    interactive: true,
+    async prompt() { return { action: "submit", selectedTaskIds: [] }; },
+  });
+
+  assert.deepEqual(calls, ["analyze:session-1"]);
+  assert.match(result.text, /No tasks selected/);
 });
 
 test("explicit plan selection supports scripts and rejects protected tasks", async () => {

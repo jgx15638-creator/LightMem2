@@ -174,7 +174,17 @@ export async function handleCleanCommand(params: {
     ? summary
     : `${rendered}\n\n${summary}`;
   const selection = await (params.prompt ?? promptForCleanTasks)(plan);
-  if (selection === undefined) return { text: resultText("Context clean cancelled; no changes were applied.") };
-  if (selection.length === 0) return { text: resultText("No tasks selected; no changes were applied.") };
-  return { text: resultText(await approveSelection(params.backend, plan, selection)) };
+  if (selection.action === "cancel") {
+    return { text: resultText(renderCleanReceipt(await params.backend.cancel(plan.planId))) };
+  }
+  if (selection.action === "interrupt") {
+    await params.backend.cancel(plan.planId);
+    throw new Error("clean_selection_interrupted");
+  }
+  if (selection.selectedTaskIds.length === 0) {
+    return { text: resultText("No tasks selected; no changes were applied.") };
+  }
+  return {
+    text: resultText(await approveSelection(params.backend, plan, selection.selectedTaskIds)),
+  };
 }
