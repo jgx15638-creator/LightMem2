@@ -137,7 +137,7 @@ with open(config_path, "r", encoding="utf-8") as f:
 plugins = cfg.setdefault("plugins", {})
 slots = plugins.setdefault("slots", {})
 if post_install:
-    slots["contextEngine"] = "layered-context"
+    slots["contextEngine"] = "tokenpilot"
 load_cfg = plugins.get("load")
 if isinstance(load_cfg, dict):
     paths = load_cfg.get("paths")
@@ -197,7 +197,12 @@ if post_install:
 
     tokenpilot_cfg["enabled"] = True
     tokenpilot_cfg["logLevel"] = str(tokenpilot_cfg.get("logLevel") or "info")
-    tokenpilot_cfg["proxyAutostart"] = True
+    # Context Cleaner runs through the native Context Engine and does not need
+    # the embedded model proxy. Starting that proxy during Gateway startup can
+    # register providers and rewrite model config after OpenClaw has prepared a
+    # model-runtime generation, invalidating the first (and sometimes later)
+    # turns. Keep it opt-in for release installs.
+    tokenpilot_cfg["proxyAutostart"] = False
     tokenpilot_cfg["proxyPort"] = int(tokenpilot_cfg.get("proxyPort") or 17667)
     tokenpilot_cfg["debugTapProviderTraffic"] = bool(tokenpilot_cfg.get("debugTapProviderTraffic", False))
 
@@ -393,14 +398,13 @@ PY
 sanitize_plugin_config 0
 
 archive_path="$("${SCRIPT_DIR}/pack_release.sh")"
+if command -v wslpath >/dev/null 2>&1; then
+  case "${archive_path}" in
+    [A-Za-z]:[\\/]*) archive_path="$(wslpath -u "${archive_path}")" ;;
+  esac
+fi
 prepare_config_for_install
-rm -rf "${INSTALLED_PLUGIN_PATH}"
-
-mkdir -p "${INSTALLED_PLUGIN_PATH}"
-tmp_extract_dir="$(mktemp -d)"
-tar -xzf "${archive_path}" -C "${tmp_extract_dir}"
-cp -R "${tmp_extract_dir}/package/." "${INSTALLED_PLUGIN_PATH}/"
-rm -rf "${tmp_extract_dir}"
+openclaw_cmd plugins install "${archive_path}" --force --accept-capabilities
 sanitize_plugin_config 1
 if ! openclaw_cmd gateway restart; then
   printf '%s\n' "Warning: gateway restart failed; restart it manually if needed."

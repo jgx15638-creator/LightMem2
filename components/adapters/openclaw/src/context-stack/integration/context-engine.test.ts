@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadCanonicalState } from "@lightrsi/history";
 
 import { createPluginContextEngine } from "./context-engine.js";
 
-function createDeps(transcriptEntries: any[]) {
+function createDeps(transcriptEntries: any[] | null) {
   const traceStages: string[] = [];
   return {
     traceStages,
@@ -33,6 +34,75 @@ function createDeps(transcriptEntries: any[]) {
   };
 }
 
+test("context engine persists runtime messages when the transcript path is unavailable", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "tokenpilot-context-engine-runtime-fallback-"));
+  try {
+    const { deps } = createDeps(null);
+    const engine = createPluginContextEngine({
+      stateDir,
+      moduleEnablement: { stabilizer: false, reduction: false, eviction: false },
+      modules: { eviction: false },
+      eviction: { enabled: false },
+      memory: { enabled: false, autoDistill: false },
+      taskStateEstimator: { evidenceMode: "three_state" },
+    }, {}, deps);
+
+    await engine.assemble({
+      sessionId: "runtime-session",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi" },
+      ],
+    });
+
+    const state = await loadCanonicalState(stateDir, "runtime-session");
+    assert.deepEqual(state?.messages, [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+    ]);
+    assert.equal(state?.seenMessageIds.length, 2);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("context engine declares fenced turns and commits them idempotently", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "tokenpilot-context-engine-commit-turn-"));
+  try {
+    const { deps } = createDeps(null);
+    const engine = createPluginContextEngine({
+      stateDir,
+      moduleEnablement: { stabilizer: false, reduction: false, eviction: false },
+      modules: { eviction: false },
+      eviction: { enabled: false },
+      memory: { enabled: false, autoDistill: false },
+      taskStateEstimator: { evidenceMode: "three_state" },
+    }, {}, deps);
+
+    assert.deepEqual(engine.info.transcriptSemantics, {
+      currentTurnFence: "before-current-turn-entry-v1",
+      turnAdvancementIdempotency: "atomic-idempotent-v1",
+    });
+
+    const params = {
+      advancementKey: "advance-1",
+      sessionId: "committed-session",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi" },
+      ],
+    };
+    assert.deepEqual(await engine.commitTurn(params), { status: "committed" });
+    assert.deepEqual(await engine.commitTurn(params), { status: "duplicate" });
+
+    const state = await loadCanonicalState(stateDir, params.sessionId);
+    assert.deepEqual(state?.messages, params.messages);
+    assert.equal(state?.seenMessageIds.length, 2);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("context engine skips eviction rewrite and traces when eviction is disabled", async () => {
   const stateDir = await mkdtemp(join(tmpdir(), "tokenpilot-context-engine-disabled-"));
   try {
@@ -48,6 +118,7 @@ test("context engine skips eviction rewrite and traces when eviction is disabled
       taskStateEstimator: { evidenceMode: "three_state" },
     }, {}, deps);
 
+    assert.equal(engine.info.id, "tokenpilot");
     const assembled = await engine.assemble({ sessionId: "session-disabled", messages: [] });
 
     assert.deepEqual(assembled.messages, [{ role: "user", content: "hello" }]);

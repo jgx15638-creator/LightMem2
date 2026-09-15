@@ -13,6 +13,17 @@ const tarCommand = process.platform === "win32"
   ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe")
   : "tar";
 
+test("release installer uses OpenClaw managed installation for capability consent", async () => {
+  const script = await readFile(join(packageDir, "scripts", "install_release.sh"), "utf8");
+  assert.match(
+    script,
+    /openclaw_cmd plugins install "\$\{archive_path\}" --force --accept-capabilities/,
+  );
+  assert.doesNotMatch(script, /tar -xzf "\$\{archive_path\}"/);
+  assert.match(script, /tokenpilot_cfg\["proxyAutostart"\] = False/);
+  assert.match(script, /slots\["contextEngine"\] = "tokenpilot"/);
+});
+
 test("release package loads without monorepo workspace dependencies", async () => {
   const extractDir = await mkdtemp(join(tmpdir(), "tokenpilot-release-smoke-"));
   let archivePath = "";
@@ -34,10 +45,15 @@ test("release package loads without monorepo workspace dependencies", async () =
     assert.equal(manifest.name, "@lightrsi/openclaw-adapter");
     assert.equal(manifest.dependencies, undefined);
     assert.equal(manifest.devDependencies, undefined);
+    const pluginManifest = JSON.parse(
+      await readFile(join(installedDir, "openclaw.plugin.json"), "utf8"),
+    );
+    assert.equal(pluginManifest.kind, "context-engine");
 
     const require = createRequire(__filename);
     const plugin = require(join(installedDir, "dist", "index.js"));
     assert.equal(plugin.id, "tokenpilot");
+    assert.equal(plugin.kind, "context-engine");
     assert.equal(typeof plugin.register, "function");
 
     const hooks = plugin.__testHooks;

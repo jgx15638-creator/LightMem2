@@ -1,6 +1,16 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { rewriteCanonicalState, syncCanonicalStateFromTranscript } from "../page-out/canonical-rewrite-adapter.js";
-import { estimateMessagesChars, saveCanonicalState } from "@lightrsi/history";
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import {
+  rewriteCanonicalState,
+  syncCanonicalStateFromTranscript,
+} from "../page-out/canonical-rewrite-adapter.js";
+import {
+  appendCanonicalTranscript,
+  estimateMessagesChars,
+  saveCanonicalState,
+} from "@lightrsi/history";
 import { appendModuleObservation } from "@lightrsi/product-surface";
 import { enqueueEvictedTasksForProceduralMemory } from "./procedural-memory.js";
 import { runHistoryEvictionIfEnabled } from "./history-eviction-runner.js";
@@ -11,11 +21,16 @@ export function createPluginContextEngine(cfg: any, logger: any, deps: any) {
   const canonicalMessageTaskIdsBound = (message: Record<string, unknown>): string[] =>
     deps.canonicalMessageTaskIds(message, deps.asRecord);
 
-  async function syncAndEvict(sessionId: string) {
+  async function syncAndEvict(
+    sessionId: string,
+    runtimeMessages: any[] = [],
+    runtimeMessageIdPrefix = "runtime",
+  ) {
     const context: {
       synced?: Awaited<ReturnType<typeof syncCanonicalStateFromTranscript>>;
       eviction?: Awaited<ReturnType<typeof runHistoryEvictionIfEnabled>>;
     } = {};
+    let transcriptAvailable = false;
     const historyModuleExecutions = await runHistoryModules({
       context,
       modules: [
@@ -29,10 +44,52 @@ export function createPluginContextEngine(cfg: any, logger: any, deps: any) {
               getMessage: (entry: any) => entry.message,
               helpers: {
                 appendTaskStateTrace: deps.appendTaskStateTrace,
-                readTranscriptEntriesForSession: deps.readTranscriptEntriesForSession,
+                readTranscriptEntriesForSession: async (currentSessionId: string) => {
+                  const entries = await deps.readTranscriptEntriesForSession(currentSessionId);
+                  transcriptAvailable = entries !== null;
+                  return entries;
+                },
                 stableIdForEntry: deps.transcriptMessageStableId,
               },
             });
+            // OpenClaw may supply a runtime-scoped session id that has no
+            // matching on-disk transcript filename. The Context Engine already
+            // receives the effective messages, so use them as the canonical
+            // input fallback instead of returning a non-persisted empty state.
+            if (!transcriptAvailable && runtimeMessages.length > 0) {
+              const runtimeEntries = runtimeMessages.map((message, index) => {
+                const record = message && typeof message === "object"
+                  ? message as Record<string, unknown>
+                  : { role: "unknown", content: String(message ?? "") };
+                const nativeId = [record.id, record.messageId, record.message_id]
+                  .find((value) => typeof value === "string" && value.trim().length > 0);
+                const row: {
+                  id?: string;
+                  timestamp?: string;
+                  message: Record<string, unknown>;
+                } = {
+                  ...(nativeId ? { id: String(nativeId) } : {}),
+                  timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
+                  message: record,
+                };
+                return {
+                  ...row,
+                  id: row.id
+                    ?? `${runtimeMessageIdPrefix}:${index}:${deps.transcriptMessageStableId(row)}`,
+                };
+              });
+              const appended = appendCanonicalTranscript(
+                context.synced.state,
+                runtimeEntries,
+                sessionId,
+                (entry) => entry.message,
+                (entry) => deps.transcriptMessageStableId(entry),
+              );
+              context.synced = {
+                state: appended.state,
+                changed: context.synced.changed || appended.changed,
+              };
+            }
             return context.synced;
           },
         },
@@ -127,19 +184,68 @@ export function createPluginContextEngine(cfg: any, logger: any, deps: any) {
     };
   }
 
+  async function reserveTurnCommit(params: {
+    advancementKey: string;
+    sessionId: string;
+    messages: any[];
+  }): Promise<boolean> {
+    const safeSessionId = params.sessionId.replace(/[^a-zA-Z0-9._-]+/g, "_") || "session";
+    const keyHash = createHash("sha256").update(params.advancementKey).digest("hex");
+    const path = join(
+      cfg.stateDir,
+      "tokenpilot",
+      "context-engine-turns",
+      safeSessionId,
+      `${keyHash}.json`,
+    );
+    await mkdir(dirname(path), { recursive: true });
+    try {
+      await writeFile(path, JSON.stringify({
+        version: 1,
+        advancementKey: params.advancementKey,
+        sessionId: params.sessionId,
+        messages: params.messages,
+        committedAt: new Date().toISOString(),
+      }), { encoding: "utf8", flag: "wx" });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+  }
+
   return {
     info: {
-      id: "layered-context",
+      id: "tokenpilot",
       name: "Layered Context Engine",
+      transcriptSemantics: {
+        currentTurnFence: "before-current-turn-entry-v1",
+        turnAdvancementIdempotency: "atomic-idempotent-v1",
+      },
     },
     async ingest() {
       return { ingested: false };
     },
     async afterTurn(params: { sessionId: string; messages: any[] }) {
+      // Accepted turns are durably advanced by commitTurn. afterTurn only
+      // reconciles host transcript state and runs post-turn modules.
       await syncAndEvict(params.sessionId);
     },
+    async commitTurn(params: {
+      advancementKey: string;
+      sessionId: string;
+      messages: any[];
+    }) {
+      const committed = await reserveTurnCommit(params);
+      const keyHash = createHash("sha256").update(params.advancementKey).digest("hex");
+      // Always reconcile the canonical mirror, including on a host retry. If a
+      // process stopped after the durable marker was written, the retry repairs
+      // the mirror while still reporting the advancement as a duplicate.
+      await syncAndEvict(params.sessionId, params.messages, `turn:${keyHash}`);
+      return { status: committed ? "committed" as const : "duplicate" as const };
+    },
     async assemble(params: { sessionId: string; messages: any[]; tokenBudget?: number }) {
-      const result = await syncAndEvict(params.sessionId);
+      const result = await syncAndEvict(params.sessionId, params.messages);
       const estimatedChars = estimateMessagesChars(result.state.messages, deps.contentToText);
       return {
         messages: result.state.messages,
@@ -147,7 +253,7 @@ export function createPluginContextEngine(cfg: any, logger: any, deps: any) {
       };
     },
     async compact(params: { sessionId: string; messages?: any[]; force?: boolean }) {
-      const result = await syncAndEvict(params.sessionId);
+      const result = await syncAndEvict(params.sessionId, params.messages ?? []);
       return {
         ok: true,
         compacted: result.changed,

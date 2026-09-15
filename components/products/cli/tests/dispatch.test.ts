@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,10 +7,24 @@ import { indexCodexHostSessionAlias } from "../../../adapters/codex/src/session-
 import { readCliContextState } from "../src/context-store.js";
 import { dispatchCli } from "../src/dispatch.js";
 
+const originalUserProfile = process.env.USERPROFILE;
+
+function setTestHome(path: string): void {
+  process.env.HOME = path;
+  // os.homedir() uses USERPROFILE on Windows, while HOME is used on POSIX.
+  // Keep both isolated so these process-global CLI tests never read real state.
+  process.env.USERPROFILE = path;
+}
+
+after(() => {
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
+});
+
 test("dispatch supports context inspection and use host flow", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-dispatch-"));
   const originalHome = process.env.HOME;
-  process.env.HOME = dir;
+  setTestHome(dir);
   try {
     const context0 = await dispatchCli(["context"]);
     assert.match(context0.text, /lastActiveHost: \(unset\)/);
@@ -36,7 +50,7 @@ test("dispatch supports context inspection and use host flow", async () => {
 test("dispatch routes codex host commands through the shared CLI bridge", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-codex-"));
   const originalHome = process.env.HOME;
-  process.env.HOME = dir;
+  setTestHome(dir);
   try {
     const codexHome = join(dir, ".codex");
     await rm(codexHome, { recursive: true, force: true });
@@ -69,7 +83,7 @@ test("dispatch remembers custom codex config paths for later host commands witho
   const originalCodexConfigPath = process.env.CODEX_CONFIG_PATH;
   const originalHooksConfigPath = process.env.CODEX_HOOKS_CONFIG_PATH;
   const originalTokenPilotConfigPath = process.env.TOKENPILOT_CODEX_CONFIG;
-  process.env.HOME = join(dir, "real-home");
+  setTestHome(join(dir, "real-home"));
   process.env.CODEX_CONFIG_PATH = join(dir, "isolated", "config.toml");
   process.env.CODEX_HOOKS_CONFIG_PATH = join(dir, "isolated", "hooks.json");
   process.env.TOKENPILOT_CODEX_CONFIG = join(dir, "isolated", "tokenpilot.json");
@@ -118,7 +132,7 @@ test("dispatch remembers custom codex config paths for later host commands witho
 test("dispatch routes claude-code host commands through the shared CLI bridge", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-claude-code-"));
   const originalHome = process.env.HOME;
-  process.env.HOME = dir;
+  setTestHome(dir);
   try {
     const status = await dispatchCli(["claude-code", "status"]);
     assert.match(status.text, /TokenPilot Claude Code status:/);
@@ -148,7 +162,7 @@ test("dispatch remembers custom claude-code config paths for later host commands
   const originalSettingsPath = process.env.CLAUDE_CODE_SETTINGS_PATH;
   const originalMcpConfigPath = process.env.CLAUDE_CODE_MCP_CONFIG_PATH;
   const originalTokenPilotConfigPath = process.env.TOKENPILOT_CLAUDE_CODE_CONFIG;
-  process.env.HOME = join(dir, "real-home");
+  setTestHome(join(dir, "real-home"));
   process.env.CLAUDE_CODE_SETTINGS_PATH = join(dir, "isolated", "settings.json");
   process.env.CLAUDE_CODE_MCP_CONFIG_PATH = join(dir, "isolated", ".claude.json");
   process.env.TOKENPILOT_CLAUDE_CODE_CONFIG = join(dir, "isolated", "tokenpilot.json");
@@ -184,7 +198,7 @@ test("dispatch remembers custom claude-code config paths for later host commands
 test("dispatch uses the default host and latest resolved codex session for hostless report", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-codex-default-report-"));
   const originalHome = process.env.HOME;
-  process.env.HOME = dir;
+  setTestHome(dir);
   try {
     const stateDir = join(dir, ".codex", "tokenpilot-state", "tokenpilot");
     await mkdir(join(stateDir, "ux-effects", "sessions"), { recursive: true });
@@ -241,7 +255,7 @@ test("dispatch uses the default host and latest resolved codex session for hostl
 test("dispatch hostless report prefers the host with the latest stats over lastActiveHost", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-report-latest-host-"));
   const originalHome = process.env.HOME;
-  process.env.HOME = dir;
+  setTestHome(dir);
   try {
     const codexStateDir = join(dir, ".codex", "tokenpilot-state", "tokenpilot");
     const claudeStateDir = join(dir, ".claude", "tokenpilot-state", "tokenpilot");
@@ -328,7 +342,7 @@ test("dispatch hostless report prefers the host with the latest stats over lastA
 test("dispatch explicit host report does not fallback to another host", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-report-explicit-host-"));
   const originalHome = process.env.HOME;
-  process.env.HOME = dir;
+  setTestHome(dir);
   try {
     const codexStateDir = join(dir, ".codex", "tokenpilot-state", "tokenpilot");
     await mkdir(join(codexStateDir, "ux-effects", "sessions"), { recursive: true });
@@ -374,7 +388,7 @@ test("dispatch explicit host report does not fallback to another host", async ()
 test("dispatch canonicalizes pinned codex host session ids before persisting CLI context", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-codex-canonical-context-"));
   const originalHome = process.env.HOME;
-  process.env.HOME = dir;
+  setTestHome(dir);
   try {
     const stateDir = join(dir, ".codex", "tokenpilot-state", "tokenpilot");
     await mkdir(join(stateDir, "session-state"), { recursive: true });
@@ -399,7 +413,7 @@ test("dispatch canonicalizes pinned codex host session ids before persisting CLI
 test("dispatch uses the pinned default claude-code session for hostless visual", async () => {
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-claude-default-visual-"));
   const originalHome = process.env.HOME;
-  process.env.HOME = dir;
+  setTestHome(dir);
   try {
     const stateDir = join(dir, ".claude", "tokenpilot-state", "tokenpilot");
     await mkdir(join(stateDir, "session-state", "sessions"), { recursive: true });
@@ -459,7 +473,7 @@ test("dispatch keeps top-level visual multi-host even when a default host is sel
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-default-host-visual-"));
   const originalHome = process.env.HOME;
   const originalConfigPath = process.env.OPENCLAW_CONFIG_PATH;
-  process.env.HOME = dir;
+  setTestHome(dir);
   process.env.OPENCLAW_CONFIG_PATH = join(dir, ".openclaw", "openclaw.json");
   try {
     const openclawStateDir = join(dir, ".openclaw", "tokenpilot-state", "tokenpilot");
@@ -486,7 +500,7 @@ test("dispatch keeps top-level visual multi-host even when a default host is sel
             },
           },
           slots: {
-            contextEngine: "layered-context",
+            contextEngine: "tokenpilot",
           },
         },
       }, null, 2)}\n`,
@@ -558,7 +572,7 @@ test("dispatch uses the default openclaw host and latest session for hostless re
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-openclaw-default-report-"));
   const originalHome = process.env.HOME;
   const originalConfigPath = process.env.OPENCLAW_CONFIG_PATH;
-  process.env.HOME = dir;
+  setTestHome(dir);
   process.env.OPENCLAW_CONFIG_PATH = join(dir, ".openclaw", "openclaw.json");
   try {
     const stateDir = join(dir, ".openclaw", "tokenpilot-state", "tokenpilot");
@@ -577,7 +591,7 @@ test("dispatch uses the default openclaw host and latest session for hostless re
             },
           },
           slots: {
-            contextEngine: "layered-context",
+            contextEngine: "tokenpilot",
           },
         },
       }, null, 2)}\n`,
@@ -629,7 +643,7 @@ test("dispatch exposes standalone lightrsi visual when no default host is select
   const dir = await mkdtemp(join(tmpdir(), "lightrsi-cli-standalone-visual-"));
   const originalHome = process.env.HOME;
   const originalConfigPath = process.env.OPENCLAW_CONFIG_PATH;
-  process.env.HOME = dir;
+  setTestHome(dir);
   process.env.OPENCLAW_CONFIG_PATH = join(dir, ".openclaw", "openclaw.json");
   try {
     const openclawStateDir = join(dir, ".openclaw", "tokenpilot-state", "tokenpilot");
@@ -656,7 +670,7 @@ test("dispatch exposes standalone lightrsi visual when no default host is select
             },
           },
           slots: {
-            contextEngine: "layered-context",
+            contextEngine: "tokenpilot",
           },
         },
       }, null, 2)}\n`,

@@ -120,6 +120,13 @@ importers:
         version: 5.9.3
 
   components/adapters/deepseek-harness:
+    dependencies:
+      '@lightrsi/cleaner':
+        specifier: workspace:*
+        version: link:../../packages/features/cleaner
+      '@lightrsi/host-adapter':
+        specifier: workspace:*
+        version: link:../../packages/foundation/host-adapter
     devDependencies:
       '@lightrsi/eviction':
         specifier: workspace:*
@@ -142,6 +149,9 @@ importers:
       '@lightrsi/artifact-store':
         specifier: workspace:*
         version: link:../../packages/foundation/artifact-store
+      '@lightrsi/cleaner':
+        specifier: workspace:*
+        version: link:../../packages/features/cleaner
       '@lightrsi/eviction':
         specifier: workspace:*
         version: link:../../packages/features/eviction

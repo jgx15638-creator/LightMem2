@@ -56,7 +56,7 @@ export const openClawProductSurfaceConfigAdapter: ProductSurfaceConfigAdapter = 
   ensurePluginEntry,
   resolveStateDir,
   setRuntimeHostDefaults(config) {
-    setNestedValue(config, CONTEXT_ENGINE_SLOT_ROOT, "layered-context");
+    setNestedValue(config, CONTEXT_ENGINE_SLOT_ROOT, "tokenpilot");
     const pluginCfg = ensurePluginConfig(config);
     setNestedValue(pluginCfg, ["contextEngine", "enabled"], true);
   },
