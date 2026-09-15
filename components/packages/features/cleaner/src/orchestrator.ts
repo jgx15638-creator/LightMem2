@@ -40,9 +40,37 @@ export type AnalyzeContextCleanSessionParams = {
   loadRegistry?: (stateDir: string, sessionId: string) => Promise<SessionTaskRegistry>;
 };
 
-function canonicalPlanId(plan: Omit<ContextCleanPlan, "planId">): string {
-  const digest = createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 24);
+function canonicalPlanId(
+  plan: Omit<ContextCleanPlan, "planId">,
+  retryAfter?: { planId: string; status: string; updatedAt: string },
+): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify(retryAfter ? { plan, retryAfter } : plan))
+    .digest("hex")
+    .slice(0, 24);
   return `ctxclean-${digest}`;
+}
+
+async function resolveAnalysisPlanId(params: {
+  stateDir: string;
+  plan: Omit<ContextCleanPlan, "planId">;
+}): Promise<string> {
+  let planId = canonicalPlanId(params.plan);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const current = await readContextCleanPlan({ stateDir: params.stateDir, planId });
+    if (current.bypassed) {
+      throwStoreFailure("clean_analysis_plan_read_failed", current.reasons);
+    }
+    if (!current.value || !isTerminalContextCleanStatus(current.value.status)) {
+      return planId;
+    }
+    planId = canonicalPlanId(params.plan, {
+      planId,
+      status: current.value.status,
+      updatedAt: current.value.updatedAt,
+    });
+  }
+  throw new Error("clean_analysis_plan_retry_limit");
 }
 
 function taskEvidence(registry: SessionTaskRegistry): Record<string, ContextCleanTaskEvidence> {
@@ -136,7 +164,10 @@ export async function analyzeContextCleanSession(
   };
   const plan: ContextCleanPlan = {
     ...planWithoutId,
-    planId: canonicalPlanId(planWithoutId),
+    planId: await resolveAnalysisPlanId({
+      stateDir: params.stateDir,
+      plan: planWithoutId,
+    }),
   };
   const saved = await saveContextCleanPlan({ stateDir: params.stateDir, plan });
   if (saved.bypassed) throwStoreFailure("clean_analysis_plan_store_failed", saved.reasons);

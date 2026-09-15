@@ -899,7 +899,10 @@ export async function startCodexResponsesProxy(params: {
         ? undefined
         : activeMutationPlan(config);
       let effectiveHistoryViewPromise: ReturnType<typeof buildCodexEffectiveHistoryView> | undefined;
-      const buildEffectiveHistoryViewForHead = (): ReturnType<typeof buildCodexEffectiveHistoryView> => {
+      let journalEffectiveHistoryViewPromise: ReturnType<typeof buildCodexEffectiveHistoryView> | undefined;
+      const buildEffectiveHistoryViewForHead = (
+        includeRolloutBootstrap = true,
+      ): ReturnType<typeof buildCodexEffectiveHistoryView> => {
         if (!requestJournalEntry || typeof originalPayload.previous_response_id !== "string") {
           throw new Error("Codex effective history requires a journaled response-chain request");
         }
@@ -908,7 +911,7 @@ export async function startCodexResponsesProxy(params: {
           sessionId,
           headResponseId: originalPayload.previous_response_id,
           currentRequestId: requestJournalEntry.requestId,
-          async rolloutViewBootstrap() {
+          ...(includeRolloutBootstrap ? { async rolloutViewBootstrap() {
             const snapshot = await loadCodexSessionSnapshot(config.stateDir, sessionId);
             if (!snapshot?.transcriptPath) return null;
             const rollout = await parseCodexRollout(snapshot.transcriptPath);
@@ -933,17 +936,28 @@ export async function startCodexResponsesProxy(params: {
               });
             }
             return validation.view;
-          },
+          } } : {}),
         });
       };
       const effectiveHistoryViewForHead = (): ReturnType<typeof buildCodexEffectiveHistoryView> => {
         effectiveHistoryViewPromise ??= buildEffectiveHistoryViewForHead();
         return effectiveHistoryViewPromise;
       };
-      const effectiveHistoryForHead = async () => resolveCodexEffectiveHistoryCurrentInputClosures({
-        view: await effectiveHistoryViewForHead(),
-        currentInput: originalPayload.input,
-      });
+      const journalEffectiveHistoryViewForHead = (): ReturnType<typeof buildCodexEffectiveHistoryView> => {
+        journalEffectiveHistoryViewPromise ??= buildEffectiveHistoryViewForHead(false);
+        return journalEffectiveHistoryViewPromise;
+      };
+      const effectiveHistoryForHead = async () => {
+        const journalHistory = resolveCodexEffectiveHistoryCurrentInputClosures({
+          view: await journalEffectiveHistoryViewForHead(),
+          currentInput: originalPayload.input,
+        });
+        if (!journalHistory.incomplete) return journalHistory;
+        return resolveCodexEffectiveHistoryCurrentInputClosures({
+          view: await effectiveHistoryViewForHead(),
+          currentInput: originalPayload.input,
+        });
+      };
 
       if (manualCleanerReserved) {
         if (!config.contextRewrite.enabled) {

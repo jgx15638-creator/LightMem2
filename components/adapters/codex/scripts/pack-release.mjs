@@ -73,7 +73,7 @@ async function main() {
     const packageDir = join(packDir, "package");
     const distDir = join(packageDir, "dist");
     await mkdir(distDir, { recursive: true });
-    for (const file of ["index.js", "cli.js", "hooks-handler.js", "install-codex.js"]) {
+    for (const file of ["index.js", "cli.js", "hooks-handler.js", "cleaner-mcp-server.js", "install-codex.js"]) {
       await copyFile(join(adapterDir, "dist", file), join(distDir, file));
     }
     await copyFile(

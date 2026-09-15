@@ -15,6 +15,7 @@ import {
 } from "../src/doctor.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { CODEX_CLEANER_MCP_SERVER_NAME } from "../src/context-cleaner/mcp-selection.js";
 
 async function main() {
   const codexConfigPath = process.env.CODEX_CONFIG_PATH ?? defaultCodexConfigPath();
@@ -29,6 +30,7 @@ async function main() {
   });
   const tokenpilotProvider = await readCodexProviderFromToml(config.providerName, codexConfigPath);
   const recoveryMcp = await readCodexMcpServerFromToml("tokenpilot_memory_fault_recover", codexConfigPath);
+  const cleanerMcp = await readCodexMcpServerFromToml(CODEX_CLEANER_MCP_SERVER_NAME, codexConfigPath);
   const upstream = await resolveUpstreamProvider(config, codexConfigPath).catch(() => undefined);
   const daemon = await readDaemonStatus(config);
   const hooksText = existsSync(hooksConfigPath) ? await readFile(hooksConfigPath, "utf8").catch(() => "") : "";
@@ -47,6 +49,7 @@ async function main() {
         : undefined,
     },
     recoveryMcp: codexMcpServerDiagnostic(recoveryMcp),
+    cleanerMcp: codexMcpServerDiagnostic(cleanerMcp),
     upstream: codexProviderDiagnostic(upstream),
     proxy: {
       baseUrl: doctor.proxyBaseUrl,

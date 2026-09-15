@@ -44,3 +44,4 @@ export {
 } from "./host-execution-bridge.js";
 export * from "./recommendation.js";
 export * from "./orchestrator.js";
+export * from "./control-service.js";

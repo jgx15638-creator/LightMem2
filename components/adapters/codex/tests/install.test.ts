@@ -204,6 +204,10 @@ test("installCodexTokenPilot writes provider, MCP, and hooks with expected comma
     assert.equal((await stat(result.cleanCliBinPath!)).isFile(), true);
     if (result.cleanCliLauncherPath) {
       assert.equal((await stat(result.cleanCliLauncherPath)).isFile(), true);
+      assert.match(
+        await readFile(join(cliBinDir, "lightrsi-clean.ps1"), "utf8"),
+        /LIGHTRSI_WINDOWS_CONSOLE_INPUT = '1'/,
+      );
     }
     const tokenPilotConfig = await loadTokenPilotCodexConfig(tokenPilotConfigPath);
     assert.equal(tokenPilotConfig.enabled, true);
@@ -548,6 +552,37 @@ test("installCodexTokenPilot rewrites the MCP server block idempotently", async 
     assert.equal(cleanerHeaders.length, 1);
     assert.equal(cleanerEnvHeaders.length, 1);
     assert.equal(cleanerEstimatorEnvVars.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("installCodexTokenPilot preserves Codex TUI animation settings", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lightrsi-codex-install-tui-animations-"));
+  try {
+    const codexConfigPath = join(dir, "config.toml");
+    const hooksConfigPath = join(dir, "hooks.json");
+    const tokenPilotConfigPath = join(dir, "tokenpilot.json");
+    await writeFile(codexConfigPath, [
+      "model_provider = \"OPENAI\"",
+      "",
+      "[tui]",
+      "animations = true",
+      "alternate_screen = false",
+      "",
+    ].join("\n"), "utf8");
+
+    await installCodexTokenPilot({
+      codexConfigPath,
+      hooksConfigPath,
+      tokenPilotConfigPath,
+      installHooks: false,
+      probeMcp: false,
+    });
+
+    const codexToml = await readFile(codexConfigPath, "utf8");
+    assert.match(codexToml, /^animations\s*=\s*true$/m);
+    assert.match(codexToml, /^alternate_screen\s*=\s*false$/m);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

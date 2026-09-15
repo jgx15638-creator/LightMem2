@@ -1,6 +1,70 @@
-# Codex Cleaner Raw-TTY Selection Design
+# Codex Cleaner Terminal Selection Design
 
 ## Status
+
+### Windows transport correction
+
+Live testing disproved the original assumption below that Codex `!` gives a
+Node child usable raw-TTY handles on Windows. Codex captures the child streams;
+redirecting Node directly to `CONIN$` still makes `setRawMode` fail.
+
+The implemented Windows path therefore keeps the existing Cleaner prompt and
+lifecycle boundaries but adds a narrow console adapter:
+
+- `lightrsi-clean.cmd` reconnects only the process input to `CONIN$`. Standard
+  output and error stay on Codex's captured command streams.
+- Its PowerShell companion sets `LIGHTRSI_WINDOWS_CONSOLE_INPUT=1` only in the
+  launcher process tree.
+- The CLI starts a short-lived PowerShell `Console.ReadKey` helper and converts
+  `Up`, `Down`, `Space`, `Enter`, `q`, and Escape to the existing prompt events.
+- A second short-lived helper activates a dedicated Windows console screen
+  buffer for the plan and selector. On the Codex alias, it also pauses the
+  validated TUI ancestor so ConPTY cannot surface its animation output.
+- The helper stops when the prompt submits or cancels. It does not modify Codex,
+  user configuration, or persistent environment variables.
+
+This correction supersedes later statements that depend on inherited raw-TTY
+handles. Native terminals continue to use `node:readline` and raw mode. On the
+Windows bridge, `q` and Escape are the structured cancellation controls;
+Ctrl+C retains the surrounding shell's normal interrupt behavior.
+
+### Windows modal screen-buffer rendering
+
+Live Windows and VS Code testing showed that Codex's animated `Working` status
+and the Cleaner child write to the same console buffer. Relative redraw and
+ANSI cursor save/restore cannot reserve a private region because the parent TUI
+can move the shared cursor between Cleaner frames. This produced overwritten
+task labels and a `Working` marker at different selector rows even though key
+handling and selection state remained correct.
+
+Absolute positioning inside the shared buffer proved insufficient: every
+cursor move was still global, so the two renderers could overwrite each other
+between a viewport read and the following frame. The Windows output adapter now
+uses `CreateConsoleScreenBuffer` and `SetConsoleActiveScreenBuffer` to give the
+Cleaner an isolated modal buffer in the same VS Code terminal. Because ConPTY
+can still surface parent-TUI refreshes across that buffer boundary, the
+Codex-only Windows launcher also marks the interaction for temporary TUI
+suppression. After validating the nearest same-session `codex.exe` ancestor
+and excluding `app-server`, the screen-buffer helper suspends that process for
+the modal interval. The Cleaner child and its key reader remain active.
+
+The helper restores the original buffer and resumes Codex from one `finally`
+block. The CLI records the guarded process ID before accepting input and has a
+second recovery path if the helper exits or times out. Failure to identify or
+suspend exactly that Codex TUI cancels the plan instead of touching another
+process or falling back to concurrent drawing. This suppression flag is set
+only on the installed Codex Cleaner alias; other LightRSI commands and Host
+adapters do not receive it.
+
+On submit or cancel, the prompt freezes the final cursor and checkbox state,
+restores the original Codex buffer, and returns one immutable transcript. The
+transcript contains the complete plan table, the separate selector, `[x]`,
+`[ ]`, and `[-]` marks, the final `>` cursor, and the selected estimate. Codex
+renders that transcript once after the command finishes. If buffer activation
+or guarded TUI suspension fails, the stored plan is cancelled with an explicit
+error; the CLI never falls back to concurrent drawing in Codex's visible
+buffer. This changes no Cleaner, MCP, task-state, receipt, or host adapter
+interface.
 
 Approved direction: the primary Codex Cleaner interaction is invoked from the
 Codex CLI with:
@@ -118,7 +182,7 @@ sequenceDiagram
     participant H as Codex adapter
 
     U->>C: !lightrsi-clean
-    C->>L: Run child with inherited stdio
+    C->>L: Run child with captured output and CONIN$ input
     L->>P: lightrsi codex clean
     P->>H: Resolve current Codex session
     H->>S: analyze(sessionId)
@@ -234,8 +298,9 @@ the raw-TTY selector.
 ## Installation and isolation
 
 The normal Codex installer creates or refreshes the command alias beside the
-existing `lightrsi` and `tokenpilot-codex` bins. Reinstallation is idempotent.
-Doctor output reports whether the alias and its Windows companion exist.
+existing `lightrsi` and `tokenpilot-codex` bins. Reinstallation is idempotent
+and preserves user-owned `[tui]` settings. Doctor output reports whether the
+alias and its Windows companion exist.
 
 Development and live verification run only from the existing isolated feature
 worktree and temporary `CODEX_HOME`, `TOKENPILOT_STATE_DIR`, bin directory, and
@@ -262,7 +327,7 @@ error, and empty submit invokes neither approval nor cancellation.
 
 Temporary directories verify Unix and Windows launcher contents, fixed
 argument order, user-argument forwarding, paths with spaces and non-ASCII
-characters, exit-code propagation, inherited stdio, idempotent installation,
+characters, exit-code propagation, split console input/captured output, idempotent installation,
 and Codex-only installation. Existing Claude installer assertions prove it is
 unchanged.
 

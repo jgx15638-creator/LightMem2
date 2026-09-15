@@ -138,6 +138,41 @@ function sendSseBlock(socket: WebSocket, block: string, streamId: unknown): void
   }
 }
 
+function jsonObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+export function codexWebSocketFallbackEvent(params: {
+  status: number;
+  text: string;
+}): Record<string, unknown> {
+  let parsed: Record<string, unknown> | undefined;
+  try {
+    parsed = jsonObject(JSON.parse(params.text));
+  } catch {
+    // The generated error below preserves the upstream text for diagnostics.
+  }
+  if (typeof parsed?.type === "string" && parsed.type) return parsed;
+
+  const nestedError = jsonObject(parsed?.error);
+  const message = [nestedError?.message, parsed?.detail, parsed?.message, params.text]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0)
+    ?.trim()
+    ?? `LightRSI HTTP compatibility bridge returned status ${params.status}.`;
+  const code = [nestedError?.code, parsed?.code]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0)
+    ?.trim()
+    ?? "http_compatibility_error";
+  return {
+    type: "error",
+    code,
+    message,
+    status: params.status,
+  };
+}
+
 async function forwardResponseCreate(params: {
   req: IncomingMessage;
   socket: WebSocket;
@@ -162,16 +197,7 @@ async function forwardResponseCreate(params: {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!response.body || !contentType.includes("text/event-stream")) {
     const text = await response.text();
-    let result: unknown;
-    try {
-      result = JSON.parse(text);
-    } catch {
-      result = {
-        type: "error",
-        code: "http_compatibility_error",
-        message: text || `LightRSI HTTP compatibility bridge returned status ${response.status}.`,
-      };
-    }
+    const result = codexWebSocketFallbackEvent({ status: response.status, text });
     sendJson(params.socket, withStreamId(result, streamId));
     return;
   }

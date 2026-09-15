@@ -2,6 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { handleCleanCommand, type CleanCommandBackend } from "../src/clean.js";
+import { processCleanPromptIsInteractive } from "../src/clean-prompt.js";
+
+test("Windows console launcher marker enables the interactive Cleaner without Node TTY flags", () => {
+  assert.equal(processCleanPromptIsInteractive({
+    platform: "win32",
+    env: { LIGHTRSI_WINDOWS_CONSOLE_INPUT: "1" },
+    inputIsTTY: false,
+    outputIsTTY: false,
+  }), true);
+  assert.equal(processCleanPromptIsInteractive({
+    platform: "win32",
+    env: {},
+    inputIsTTY: false,
+    outputIsTTY: false,
+  }), false);
+});
 
 test("non-interactive clean is analysis-only and never calls approve", async () => {
   let approved = false;

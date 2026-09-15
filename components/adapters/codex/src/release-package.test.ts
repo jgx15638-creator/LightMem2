@@ -31,6 +31,8 @@ test("packaged Codex codec emits GPT-5.6 cache boundaries without mutating user 
     const installedDir = join(extractDir, "package");
     const manifest = JSON.parse(await readFile(join(installedDir, "package.json"), "utf8"));
     assert.equal(manifest.name, "@lightrsi/codex-adapter");
+    assert.match(await readFile(join(installedDir, "dist", "mcp-server.js"), "utf8"), /memory_fault_recover/u);
+    assert.match(await readFile(join(installedDir, "dist", "cleaner-mcp-server.js"), "utf8"), /lightrsi_clean/u);
     const require = createRequire(__filename);
     const bundled = require(join(installedDir, "dist", "index.js"));
     const codec = bundled.createCodexResponsesPayloadCodec();

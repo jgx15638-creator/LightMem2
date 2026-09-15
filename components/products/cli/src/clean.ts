@@ -1,4 +1,8 @@
-import { promptForCleanTasks, type CleanTaskPrompt } from "./clean-prompt.js";
+import {
+  processCleanPromptIsInteractive,
+  promptForCleanTasks,
+  type CleanTaskPrompt,
+} from "./clean-prompt.js";
 import {
   renderCleanPlan,
   renderCleanReceipt,
@@ -163,7 +167,7 @@ export async function handleCleanCommand(params: {
     return { text: await approveSelection(params.backend, plan, parsed.selectedTaskIds) };
   }
 
-  const interactive = params.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const interactive = params.interactive ?? processCleanPromptIsInteractive();
   if (parsed.requireTty && !interactive) throw new Error("clean_interactive_tty_required");
   const sessionId = params.sessionId?.trim() || parsed.sessionId;
   if (!sessionId) throw new Error("clean_session_id_missing");
@@ -173,22 +177,33 @@ export async function handleCleanCommand(params: {
     return { text: renderNonInteractiveAnalysis(plan, rendered) };
   }
   const terminalPromptOwnsPlanOutput = params.prompt === undefined
-    && Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const resultText = (summary: string) => terminalPromptOwnsPlanOutput
-    ? summary
-    : `${rendered}\n\n${summary}`;
+    && processCleanPromptIsInteractive();
+  const resultText = (summary: string, transcript?: string) => transcript
+    ? `${transcript}\n\n${summary}`
+    : terminalPromptOwnsPlanOutput
+      ? summary
+      : `${rendered}\n\n${summary}`;
   const selection = await (params.prompt ?? promptForCleanTasks)(plan);
   if (selection.action === "cancel") {
-    return { text: resultText(renderCleanReceipt(await params.backend.cancel(plan.planId))) };
+    const receipt = renderCleanReceipt(await params.backend.cancel(plan.planId));
+    const unavailable = selection.reason === "windows_console_buffer_unavailable"
+      ? "Windows Cleaner screen buffer unavailable; the plan was cancelled.\n\n"
+      : "";
+    return { text: resultText(`${unavailable}${receipt}`, selection.transcript) };
   }
   if (selection.action === "interrupt") {
     await params.backend.cancel(plan.planId);
     throw new Error("clean_selection_interrupted");
   }
   if (selection.selectedTaskIds.length === 0) {
-    return { text: resultText("No tasks selected; no changes were applied.") };
+    return {
+      text: resultText("No tasks selected; no changes were applied.", selection.transcript),
+    };
   }
   return {
-    text: resultText(await approveSelection(params.backend, plan, selection.selectedTaskIds)),
+    text: resultText(
+      await approveSelection(params.backend, plan, selection.selectedTaskIds),
+      selection.transcript,
+    ),
   };
 }

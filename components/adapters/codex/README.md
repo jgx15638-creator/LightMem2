@@ -78,6 +78,7 @@ If `lightrsi` is not found after install, make sure `~/.local/bin` is on your `P
 The installer will:
 
 - keep the current active `model_provider`
+- preserve existing `[tui]` settings, including Codex animations
 - repoint that active provider's `base_url` to the local TokenPilot proxy
 - persist the original upstream provider config into `~/.codex/tokenpilot.json`
 - register `tokenpilot_memory_fault_recover` and `lightrsi_cleaner` MCP servers in Codex config
@@ -110,11 +111,19 @@ session:
 !lightrsi-clean
 ```
 
-The command runs in the current terminal. Up/Down moves only between selectable
-completed tasks, Space toggles the current task, Enter submits the exact checked
-tasks, and `q` or Escape cancels the plan. Ctrl+C interrupts and restores the
-terminal without scheduling a rewrite. Every selectable task starts unchecked,
-while protected tasks are shown for context and cannot receive focus.
+The command runs in the current terminal. On Windows it temporarily activates a
+modal console buffer in the same terminal; it does not open another window.
+During that modal interval, the launcher suspends only the validated Codex TUI
+ancestor so its `Working` animation cannot redraw through ConPTY. It resumes
+the TUI before returning the result; analysis, selection persistence, and the
+following Host request continue normally.
+Up/Down moves only between selectable completed tasks, Space toggles the current
+task, Enter submits the exact checked tasks, and `q` or Escape cancels the plan.
+Ctrl+C interrupts and restores the terminal without scheduling a rewrite. Every
+selectable task starts unchecked, while protected tasks are shown for context
+and cannot receive focus. After the modal buffer closes, Codex records one
+static copy of the complete plan and final selector state, including `[x]`,
+`[ ]`, `[-]`, and the final `>` cursor.
 
 Submitting a non-empty selection schedules it for the next Codex Host request;
 the current request only records the selection. Send a harmless follow-up after
@@ -356,10 +365,18 @@ tokenpilot-codex status
 Expected install shape:
 
 - root `model_provider` stays on your original Codex provider, such as `OPENAI`
+- existing `[tui]` settings are unchanged
 - that provider's `base_url` is rewritten to `http://127.0.0.1:<port>/v1`
 - the real upstream base URL is stored in `~/.codex/tokenpilot.json`
 
 If Codex reports that hooks need review, trust the TokenPilot hooks in Codex, open a new session, and rerun the doctor.
+
+On Windows, the Cleaner selector uses a dedicated console screen buffer while
+it is active. The Codex-only launcher temporarily suspends the exact
+same-session Codex TUI ancestor after the plan is ready, then restores the
+original buffer and resumes the TUI before returning the final static Cleaner
+transcript. This prevents the live `Working` timer from overwriting or
+duplicating selector rows without changing the Cleaner control or receipt flow.
 
 If Codex displays `PostToolUse hook (failed)` after a repository reorganization, rebuild and reinstall the adapter so `~/.codex/hooks.json` points at the current handler. Reinstall also removes legacy TokenPilot `Stop` hooks:
 

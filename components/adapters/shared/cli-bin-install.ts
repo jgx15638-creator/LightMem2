@@ -20,6 +20,8 @@ export async function installLightRsiCommandAlias(params: {
   fixedArgs: readonly string[];
   platform?: NodeJS.Platform;
   nodePath?: string;
+  windowsConsoleInput?: boolean;
+  windowsSuppressCodexTui?: boolean;
 }): Promise<{
   binPath: string;
   launcherPath?: string;
@@ -43,6 +45,8 @@ export async function installLightRsiCommandAlias(params: {
     platform: params.platform,
     nodePath: params.nodePath,
     fixedArgs: params.fixedArgs,
+    consoleInput: params.windowsConsoleInput,
+    suppressCodexTui: params.windowsSuppressCodexTui,
   });
 
   return { binPath, launcherPath, cliDistPath };

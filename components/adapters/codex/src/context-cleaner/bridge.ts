@@ -5,6 +5,7 @@ import {
   type ContextCleanReceipt,
   type ExecuteApprovedContextCleanParams,
 } from "@lightrsi/cleaner";
+import type { TaskStateEstimator } from "@lightrsi/eviction";
 import { loadSessionTaskRegistry } from "@lightrsi/history";
 import {
   MODEL_CONTEXT_REWRITE_SCHEMA_VERSION,
@@ -18,10 +19,12 @@ import {
   readCodexContextHistoryJournal,
   type CodexContextHistoryJournalEntry,
   type CodexEffectiveHistoryView,
+  type CodexRequestJournalEntry,
   type CodexResponseJournalEntry,
 } from "../context-history/index.js";
 import { codexSharedContextRewriteBackend } from "../context-rewrite/backend.js";
 import { buildCodexLifecycleBackendRequest } from "../context-rewrite/lifecycle-input.js";
+import { runCodexLifecyclePlanner } from "../context-rewrite/lifecycle-runner.js";
 import {
   loadCodexSessionSnapshot,
 } from "../session-state.js";
@@ -46,6 +49,10 @@ function completeCleanerView(view: CodexEffectiveHistoryView): boolean {
 
 function cleanerAnalysisToolCall(item: Record<string, unknown>): boolean {
   if (item.type !== "custom_tool_call" && item.type !== "function_call") return false;
+  const toolName = typeof item.name === "string" ? item.name.trim() : "";
+  if (/^(?:(?:mcp__)?lightrsi_cleaner(?:__|\.))?lightrsi_clean$/i.test(toolName)) {
+    return true;
+  }
   let command = [item.name, item.input, item.arguments]
     .filter((value): value is string => typeof value === "string")
     .join(" ");
@@ -57,7 +64,8 @@ function cleanerAnalysisToolCall(item: Record<string, unknown>): boolean {
     command = decoded;
   }
   return /\blightrsi(?:\.cmd|\.exe)?\s+codex\s+clean(?:\s|$)/i.test(command)
-    || /(?:^|[\\/])dist[\\/](?:cli|lightrsi)\.js[\s\S]*?["']codex["'][\s\S]*?["']clean["']/i.test(command);
+    || /(?:^|[\\/])dist[\\/](?:cli|lightrsi)\.js[\s\S]*?["']codex["'][\s\S]*?["']clean["']/i.test(command)
+    || /\btools\s*\.\s*mcp__lightrsi_cleaner__lightrsi_clean\b/i.test(command);
 }
 
 function responseForHead(
@@ -71,6 +79,18 @@ function responseForHead(
   ));
 }
 
+function requestForResponse(
+  entries: readonly CodexContextHistoryJournalEntry[],
+  response: CodexResponseJournalEntry,
+): CodexRequestJournalEntry | undefined {
+  if (!response.requestId) return undefined;
+  return [...entries].reverse().find((entry): entry is CodexRequestJournalEntry => (
+    entry.kind === "request"
+    && entry.requestId === response.requestId
+    && entry.status !== "failed"
+  ));
+}
+
 function parentResponseId(
   entries: readonly CodexContextHistoryJournalEntry[],
   response: CodexResponseJournalEntry,
@@ -79,13 +99,35 @@ function parentResponseId(
     ? response.previousResponseId.trim()
     : "";
   if (responseParent) return responseParent;
-  if (!response.requestId) return undefined;
-  const request = [...entries].reverse().find((entry) => (
-    entry.kind === "request"
-    && entry.requestId === response.requestId
-    && entry.status !== "failed"
-  ));
-  return request?.kind === "request" ? request.previousResponseId?.trim() || undefined : undefined;
+  return requestForResponse(entries, response)?.previousResponseId?.trim() || undefined;
+}
+
+function assistantMessage(item: Record<string, unknown>): boolean {
+  return item.type === "message" && item.role === "assistant";
+}
+
+function cleanerReplayInputBoundary(items: readonly Record<string, unknown>[]): number {
+  let lastAssistant = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (assistantMessage(items[index]!)) {
+      lastAssistant = index;
+      break;
+    }
+  }
+  let boundary = lastAssistant + 1;
+  while (boundary > 0 && assistantMessage(items[boundary - 1]!)) {
+    let previousAssistant = -1;
+    for (let index = boundary - 2; index >= 0; index -= 1) {
+      if (assistantMessage(items[index]!)) {
+        previousAssistant = index;
+        break;
+      }
+    }
+    const previousTurnStart = previousAssistant + 1;
+    if (!items.slice(previousTurnStart, boundary).some(cleanerAnalysisToolCall)) break;
+    boundary = previousTurnStart;
+  }
+  return boundary;
 }
 
 async function readCleanerSnapshotSource(params: {
@@ -94,11 +136,16 @@ async function readCleanerSnapshotSource(params: {
   session: Awaited<ReturnType<typeof loadCodexSessionSnapshot>> & {};
   currentCodexSessionId?: string;
 }): Promise<CleanerSnapshotSource> {
-  const buildView = (headResponseId: string | undefined, withRollout: boolean) => (
+  const buildView = (
+    headResponseId: string | undefined,
+    withRollout: boolean,
+    requestInputBoundary?: { requestId: string; itemCount: number },
+  ) => (
     buildCodexEffectiveHistoryView({
       stateDir: params.stateDir,
       sessionId: params.sessionId,
       headResponseId,
+      requestInputBoundary,
       ...(withRollout
         ? {
             async rolloutViewBootstrap() {
@@ -144,6 +191,22 @@ async function readCleanerSnapshotSource(params: {
       };
     }
     candidateId = parentResponseId(journal.entries, candidateResponse);
+  }
+
+  const latestRequest = requestForResponse(journal.entries, latestResponse);
+  if (!latestRequest) return fallback;
+  const replayItems = latestRequest.committedInputItems ?? latestRequest.inputItems;
+  const itemCount = cleanerReplayInputBoundary(replayItems);
+  const boundaryView = await buildView(latestResponseId, false, {
+    requestId: latestRequest.requestId,
+    itemCount,
+  });
+  if (completeCleanerView(boundaryView)) {
+    return {
+      view: boundaryView,
+      headResponseId: latestResponseId,
+      capturedAt: latestRequest.observedAt,
+    };
   }
   return fallback;
 }
@@ -290,6 +353,12 @@ export function createCodexContextCleanerBridge(params: {
   stateDir: string;
   controlPlane: ContextCleanerControlPlane;
   currentCodexSessionId?: string;
+  resolveCurrentCodexSessionId?: (sessionId: string) => Promise<string | undefined>;
+  taskStateEstimator?: TaskStateEstimator;
+  taskStateEstimatorConfig?: {
+    batchTurns: number;
+    inputMode: "sliding_window" | "completed_summary_plus_active_turns";
+  };
 }): ContextCleanerHostBridge {
   return {
     hostId: CODEX_HOST_ID,
@@ -300,21 +369,54 @@ export function createCodexContextCleanerBridge(params: {
     async readCleanSnapshot(sessionId) {
       const session = await loadCodexSessionSnapshot(params.stateDir, sessionId);
       if (!session) throw new Error("codex_clean_session_not_found");
+      const resolvedCurrentCodexSessionId = params.currentCodexSessionId?.trim()
+        || (await params.resolveCurrentCodexSessionId?.(sessionId))?.trim()
+        || undefined;
       const source = await readCleanerSnapshotSource({
         stateDir: params.stateDir,
         sessionId,
         session,
-        currentCodexSessionId: params.currentCodexSessionId,
+        currentCodexSessionId: resolvedCurrentCodexSessionId,
       });
       const { view } = source;
       if (!completeCleanerView(view)) {
         throw new Error("codex_clean_snapshot_incomplete");
       }
+      const model = session.latestModel?.trim() || undefined;
+      if (params.taskStateEstimator) {
+        await runCodexLifecyclePlanner({
+          stateDir: params.stateDir,
+          sessionId,
+          view,
+          backendRequest: {
+            sessionId,
+            payload: {
+              ...(model ? { model } : {}),
+              ...(source.headResponseId
+                ? { previous_response_id: source.headResponseId }
+                : {}),
+              input: [],
+            },
+            effectiveHistory: view.history,
+            currentInput: [],
+          },
+          estimator: params.taskStateEstimator,
+          config: {
+            enabled: true,
+            batchTurns: params.taskStateEstimatorConfig?.batchTurns ?? 1,
+            evictionEnabled: false,
+            evictionPolicy: "noop",
+            evictionMinBlockChars: 256,
+          },
+          createdAt: source.capturedAt,
+          inputMode: params.taskStateEstimatorConfig?.inputMode,
+          sourcePresetId: "tokenpilot-cleaner",
+        });
+      }
       const registry = await loadSessionTaskRegistry(params.stateDir, sessionId);
       if (registry.sessionId !== sessionId) {
         throw new Error("codex_clean_registry_session_mismatch");
       }
-      const model = session.latestModel?.trim() || undefined;
       const backendRequest = buildCodexLifecycleBackendRequest({
         view,
         registry,

@@ -663,6 +663,8 @@ export async function installCodexTokenPilot(params?: {
       binName: "lightrsi-clean",
       fixedArgs: ["codex", "clean", "--require-tty"],
       platform: params?.platform,
+      windowsConsoleInput: true,
+      windowsSuppressCodexTui: true,
     })
     : undefined;
   await rememberCliHostPathOverrides("codex", {

@@ -8,6 +8,8 @@ import { reserveUnusedPort } from "@lightrsi/host-adapter";
 
 import { normalizeTokenPilotCodexConfig } from "../src/config.js";
 import {
+  appendCodexRequestJournalEntry,
+  appendCodexResponseJournalEntry,
   buildCodexEffectiveHistory,
   codexContextHistoryJournalPath,
   loadCodexContextHistoryJournal,
@@ -22,6 +24,7 @@ import {
   readLatestCodexRebaseEpoch,
 } from "../src/context-rewrite/index.js";
 import {
+  indexCodexResponseSession,
   loadCodexSessionSnapshot,
   resolveCodexSessionAlias,
   resolveCodexSessionIdByResponseId,
@@ -587,6 +590,149 @@ test("CDR-06 proxy automatically replaces an unsupported response chain with sta
       && event.reasonCodes.includes("feature_disabled")
     ));
     assert.ok(featureDisabled);
+  } finally {
+    await runtime?.close();
+    await upstream.close();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("CDR-06 continuation replay does not duplicate a current tool output from rollout bootstrap", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-current-tool-output-"));
+  const upstream = await startSequencedResponsesUpstream({ rejectChain: true });
+  let runtime: Awaited<ReturnType<typeof startCodexResponsesProxy>> | undefined;
+  try {
+    const sessionId = "codex-session-current-tool-output";
+    const headResponseId = "resp-current-tool-head";
+    const callId = "call-current-tool";
+    const currentToolOutput = JSON.stringify([
+      { type: "input_text", text: "CURRENT_TOOL_OUTPUT_SENTINEL" },
+    ]);
+    const rootRequest = await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "req-current-tool-root",
+      status: "completed",
+      payload: {
+        model: "gpt-fixture",
+        input: [{ role: "user", content: "RUN_CURRENT_TOOL_SENTINEL" }],
+      },
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: rootRequest.requestId,
+      status: "completed",
+      response: {
+        id: headResponseId,
+        status: "completed",
+        output: [{
+          type: "function_call",
+          id: "fc-current-tool",
+          call_id: callId,
+          name: "lightrsi_clean",
+          arguments: "{}",
+        }],
+      },
+    });
+    await indexCodexResponseSession(stateDir, headResponseId, sessionId);
+
+    const rolloutPath = join(stateDir, "current-tool-rollout.jsonl");
+    const rolloutRecords = [
+      {
+        timestamp: "2026-09-13T00:00:00.000Z",
+        type: "session_meta",
+        payload: { id: sessionId, cwd: "/workspace/example", model_provider: "tokenpilot" },
+      },
+      {
+        timestamp: "2026-09-13T00:00:01.000Z",
+        type: "compacted",
+        payload: {
+          replacement_history: [
+            { role: "user", type: "message", content: "RUN_CURRENT_TOOL_SENTINEL" },
+          ],
+        },
+      },
+      {
+        timestamp: "2026-09-13T00:00:02.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          id: "fc-current-tool",
+          call_id: callId,
+          name: "lightrsi_clean",
+          arguments: "{}",
+        },
+      },
+      {
+        timestamp: "2026-09-13T00:00:03.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          id: "fco-current-tool",
+          call_id: callId,
+          output: [{ type: "input_text", text: "CURRENT_TOOL_OUTPUT_SENTINEL" }],
+        },
+      },
+    ];
+    await writeFile(
+      rolloutPath,
+      `${rolloutRecords.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      "utf8",
+    );
+    await upsertCodexSessionSnapshot(stateDir, sessionId, {
+      codexSessionId: sessionId,
+      transcriptPath: rolloutPath,
+      latestModel: "gpt-fixture",
+      latestUpstreamProvider: "provider-fixture",
+    });
+
+    const config = normalizeTokenPilotCodexConfig({
+      stateDir,
+      proxyPort: await reserveFetchPort(),
+      upstreamProvider: "provider-fixture",
+      upstream: {
+        name: "provider-fixture",
+        baseUrl: upstream.baseUrl,
+        wireApi: "responses",
+        requiresOpenAIAuth: false,
+      },
+      modules: { stabilizer: false, reduction: false },
+      contextRewrite: {
+        enabled: false,
+        providerCompatibilityProbe: "real_provider",
+      },
+    } as any);
+    runtime = await startCodexResponsesProxy({ config, logger: createConsoleLogger(false) });
+
+    const response = await fetch(`${runtime.baseUrl}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-fixture",
+        stream: false,
+        previous_response_id: headResponseId,
+        metadata: { tokenpilotSessionId: sessionId },
+        input: [{
+          type: "function_call_output",
+          id: "fco-current-tool",
+          call_id: callId,
+          output: currentToolOutput,
+        }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(upstream.requests.length, 2);
+    assert.equal(upstream.requests[0]?.previous_response_id, headResponseId);
+    assert.equal("previous_response_id" in (upstream.requests[1] ?? {}), false);
+    const replayInput = Array.isArray(upstream.requests[1]?.input)
+      ? upstream.requests[1].input as JsonObject[]
+      : [];
+    assert.equal(replayInput.filter((item) => item.call_id === callId && item.type === "function_call").length, 1);
+    assert.equal(
+      replayInput.filter((item) => item.call_id === callId && item.type === "function_call_output").length,
+      1,
+    );
   } finally {
     await runtime?.close();
     await upstream.close();

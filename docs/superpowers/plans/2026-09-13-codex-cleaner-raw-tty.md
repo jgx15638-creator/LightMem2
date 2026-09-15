@@ -4,11 +4,17 @@
 
 **Goal:** Make `!lightrsi-clean` open LightRSI's task selector in the current Codex terminal with Up/Down navigation, Space toggling, Enter submission, and `q` cancellation.
 
-**Architecture:** A Codex-only installed launcher forwards inherited stdio to `lightrsi codex clean --require-tty`. The CLI prompt returns an explicit submit/cancel/interrupt result, while the command layer owns approval and cancellation effects through the existing shared Cleaner control service. MCP elicitation remains installed as a compatibility path.
+**Architecture:** A Codex-only installed launcher runs `lightrsi codex clean --require-tty`. Native terminals use the existing raw-mode prompt. On Windows, the launcher reconnects `CONIN$` input while leaving output captured by Codex. Short-lived PowerShell helpers translate console keys, activate a modal screen buffer in the same terminal, and temporarily suspend only the validated same-session Codex TUI ancestor while the selector is open. Normal cleanup and an independent CLI recovery path resume Codex before one immutable plan-and-selection transcript is returned. The command layer still owns approval and cancellation effects through the existing shared Cleaner control service. MCP elicitation remains installed as a compatibility path.
 
 **Tech Stack:** TypeScript 5.9, Node.js 22.13+, Node test runner, `node:readline` keypress events, PowerShell 5.1 and POSIX command shims, pnpm workspaces.
 
 **Spec:** `docs/superpowers/specs/2026-09-13-codex-cleaner-raw-tty-design.md`
+
+> Windows correction: live testing showed that Codex captures `!` child stdio
+> and Node raw mode remains unavailable after direct console redirection. The
+> Windows console adapter in the updated spec supersedes steps that assume
+> inherited raw-TTY handles. Existing prompt, backend, receipt, and apply work
+> remains valid.
 
 ## Global Constraints
 
@@ -271,7 +277,8 @@ export async function installLightRsiCommandAlias(params: {
 ```
 
 The extensionless wrapper uses `exec`. On Windows, call the shared launcher
-writer with `fixedArgs`. Never use `Start-Process`, pipes, or redirected stdio.
+writer with `fixedArgs`. Never use `Start-Process` or pipe standard output and
+error; the raw-TTY alias may reconnect standard input to `CONIN$`.
 
 In `windows-command-launcher.ts`, quote each fixed argument with the existing
 PowerShell literal function and place them between the target path and `@args`.

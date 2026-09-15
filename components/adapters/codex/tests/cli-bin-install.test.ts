@@ -44,6 +44,8 @@ test("CLI bin installer writes Windows command launchers for the shared and host
       fixedArgs: ["codex", "clean", "--require-tty"],
       platform: "win32",
       nodePath: "C:\\Program Files\\nodejs\\node.exe",
+      windowsConsoleInput: true,
+      windowsSuppressCodexTui: true,
     });
 
     assert.equal(shared.launcherPath, join(binDir, "lightrsi.cmd"));
@@ -60,6 +62,22 @@ test("CLI bin installer writes Windows command launchers for the shared and host
     assert.match(
       await readFile(join(binDir, "lightrsi-clean.ps1"), "utf8"),
       /'C:\\Program Files\\nodejs\\node\.exe'.*lightrsi\.js.*'codex' 'clean' '--require-tty' @args/,
+    );
+    assert.match(
+      await readFile(join(binDir, "lightrsi-clean.ps1"), "utf8"),
+      /LIGHTRSI_WINDOWS_CONSOLE_INPUT = '1'/,
+    );
+    assert.match(
+      await readFile(join(binDir, "lightrsi-clean.ps1"), "utf8"),
+      /LIGHTRSI_WINDOWS_SUPPRESS_CODEX_TUI = '1'/,
+    );
+    assert.match(
+      await readFile(clean.launcherPath!, "ascii"),
+      /< CONIN\$/,
+    );
+    assert.doesNotMatch(
+      await readFile(clean.launcherPath!, "ascii"),
+      /> CONOUT\$/,
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -136,6 +154,7 @@ test("Windows command launchers execute shared and Host CLIs with forwarded argu
     await copyFile(process.execPath, unicodeNodePath);
     const fakeCli = [
       'require("node:fs").writeFileSync(process.env.LIGHTRSI_LAUNCHER_LOG, JSON.stringify(process.argv.slice(2)));',
+      'process.stdout.write("CAPTURED_OUTPUT\\n");',
       'process.exit(Number(process.env.LIGHTRSI_LAUNCHER_EXIT_CODE || "0"));',
       "",
     ].join("\n");
@@ -162,6 +181,8 @@ test("Windows command launchers execute shared and Host CLIs with forwarded argu
       fixedArgs: ["codex", "clean", "--require-tty"],
       platform: "win32",
       nodePath: unicodeNodePath,
+      windowsConsoleInput: true,
+      windowsSuppressCodexTui: true,
     });
     const powershell = join(
       process.env.SystemRoot ?? "C:\\Windows",
@@ -187,7 +208,7 @@ test("Windows command launchers execute shared and Host CLIs with forwarded argu
     ], {
       env: { ...process.env, LIGHTRSI_LAUNCHER_LOG: hostLog },
     });
-    await execFileAsync(powershell, [
+    const cleanResult = await execFileAsync(powershell, [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
@@ -195,6 +216,7 @@ test("Windows command launchers execute shared and Host CLIs with forwarded argu
     ], {
       env: { ...process.env, LIGHTRSI_LAUNCHER_LOG: cleanLog },
     });
+    assert.equal(cleanResult.stdout.toString(), "CAPTURED_OUTPUT\n");
 
     assert.deepEqual(JSON.parse(await readFile(sharedLog, "utf8")), ["codex", "clean", "--help"]);
     assert.deepEqual(JSON.parse(await readFile(hostLog, "utf8")), ["doctor"]);
