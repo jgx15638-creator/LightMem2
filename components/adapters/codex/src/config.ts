@@ -96,6 +96,7 @@ export type CodexMcpServerConfig = {
   command: string;
   args: string[];
   env: Record<string, string>;
+  envVars?: string[];
   startupTimeoutSec?: number;
 };
 
@@ -385,6 +386,11 @@ export async function readCodexMcpServerFromToml(
     ? Array.from(argsValue.matchAll(/"((?:\\.|[^"])*)"|'([^']*)'/g)).map((match) =>
       (match[1] ?? match[2] ?? "").replace(/\\"/g, "\"").replace(/\\\\/g, "\\"))
     : [];
+  const envVarsValue = section.values.env_vars?.trim();
+  const envVars = envVarsValue
+    ? Array.from(envVarsValue.matchAll(/"((?:\\.|[^"])*)"|'([^']*)'/g)).map((match) =>
+      (match[1] ?? match[2] ?? "").replace(/\\"/g, "\"").replace(/\\\\/g, "\\"))
+    : [];
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(envSection?.values ?? {})) {
     const parsed = parseTomlStringValue(value);
@@ -397,6 +403,7 @@ export async function readCodexMcpServerFromToml(
     command,
     args,
     env,
+    envVars,
     startupTimeoutSec: Number.isFinite(startupTimeoutSec) ? startupTimeoutSec : undefined,
   };
 }

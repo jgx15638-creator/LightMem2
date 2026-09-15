@@ -3,6 +3,29 @@ import test from "node:test";
 
 import { renderCleanPlan, renderCleanReceipt } from "../src/clean-renderer.js";
 
+function terminalWidth(value: string): number {
+  let width = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (/\p{Mark}/u.test(character)) continue;
+    width += codePoint >= 0x1100 && (
+      codePoint <= 0x115f
+      || codePoint === 0x2329
+      || codePoint === 0x232a
+      || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+      || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+      || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+      || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+      || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+      || (codePoint >= 0xff00 && codePoint <= 0xff60)
+      || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+      || (codePoint >= 0x1f300 && codePoint <= 0x1faff)
+      || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+    ) ? 2 : 1;
+  }
+  return width;
+}
+
 test("clean renderer shows task-level accounting without item ids", () => {
   const text = renderCleanPlan({
     planId: "plan-1",
@@ -39,6 +62,42 @@ test("clean renderer shows task-level accounting without item ids", () => {
   assert.equal(taskRows.length, 2);
   assert.ok(taskRows.every((line) => line.length <= 100));
   assert.doesNotMatch(text, /item-/);
+});
+
+test("clean renderer keeps the plan table and details within the terminal width", () => {
+  const maxWidth = 96;
+  const taskId = "codex-synth-12345678-1234-5678-90ab-1234567890ab:t1-task";
+  const description = "用约 120 字说明 authentication 与 authorization 的区别，并各举一个简单例子。";
+  const text = renderCleanPlan({
+    planId: "ctxclean-1234567890abcdef",
+    hostId: "codex",
+    sessionId: "codex-synth-12345678-1234-5678-90ab-1234567890ab",
+    contextWindowTokens: 100_000,
+    usedTokens: 24_084,
+    usedChars: 96_336,
+    protectedTokens: 16_664,
+    protectedChars: 66_656,
+    unassignedTokens: 0,
+    unassignedChars: 0,
+    tokenCountMode: "exact",
+    tasks: [{
+      taskId,
+      label: "任务 A：说明 authentication 与 authorization 的区别",
+      description,
+      lifecycleState: "completed",
+      tokenCount: 3_089,
+      charCount: 12_356,
+      tokenPercent: 12.8,
+      recommendation: "clean",
+      reasonCodes: ["completed", "no_unresolved_issues", "no_future_reuse_signals"],
+      selectable: true,
+    }],
+  }, { maxWidth });
+
+  assert.match(text, /TASK\s+DESCRIPTION\s+SIZE\s+SHARE\s+ADVICE\s+RISK \/ REASONS/);
+  assert.match(text, /Task details:/);
+  assert.match(text, /Reason codes:/);
+  assert.ok(text.split("\n").every((line) => terminalWidth(line) <= maxWidth));
 });
 
 test("receipt renderer distinguishes estimates from applied savings", () => {

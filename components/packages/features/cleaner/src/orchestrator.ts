@@ -43,15 +43,39 @@ export type AnalyzeContextCleanSessionParams = {
 function canonicalPlanId(
   plan: Omit<ContextCleanPlan, "planId">,
   analysis: { fallbackUsed: boolean; reasons: string[] },
+  retryAfter?: { planId: string; status: string; updatedAt: string },
 ): string {
   // The analyzed receipt is immutable state associated with the plan id too.
   // Include its recommendation outcome so two analyses that produce the same
   // task view but different fallback evidence cannot alias the same plan.
   const digest = createHash("sha256")
-    .update(JSON.stringify({ plan, analysis }))
+    .update(JSON.stringify(retryAfter ? { plan, analysis, retryAfter } : { plan, analysis }))
     .digest("hex")
     .slice(0, 24);
   return `ctxclean-${digest}`;
+}
+
+async function resolveAnalysisPlanId(params: {
+  stateDir: string;
+  plan: Omit<ContextCleanPlan, "planId">;
+  analysis: { fallbackUsed: boolean; reasons: string[] };
+}): Promise<string> {
+  let planId = canonicalPlanId(params.plan, params.analysis);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const current = await readContextCleanPlan({ stateDir: params.stateDir, planId });
+    if (current.bypassed) {
+      throwStoreFailure("clean_analysis_plan_read_failed", current.reasons);
+    }
+    if (!current.value || !isTerminalContextCleanStatus(current.value.status)) {
+      return planId;
+    }
+    planId = canonicalPlanId(params.plan, params.analysis, {
+      planId,
+      status: current.value.status,
+      updatedAt: current.value.updatedAt,
+    });
+  }
+  throw new Error("clean_analysis_plan_retry_limit");
 }
 
 function taskEvidence(registry: SessionTaskRegistry): Record<string, ContextCleanTaskEvidence> {
@@ -145,9 +169,13 @@ export async function analyzeContextCleanSession(
   };
   const plan: ContextCleanPlan = {
     ...planWithoutId,
-    planId: canonicalPlanId(planWithoutId, {
-      fallbackUsed: recommended.fallbackUsed,
-      reasons: recommended.reasons,
+    planId: await resolveAnalysisPlanId({
+      stateDir: params.stateDir,
+      plan: planWithoutId,
+      analysis: {
+        fallbackUsed: recommended.fallbackUsed,
+        reasons: recommended.reasons,
+      },
     }),
   };
   const saved = await saveContextCleanPlan({ stateDir: params.stateDir, plan });

@@ -35,7 +35,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "${PACK_TMP_DIR}/package/dist"
-for file in index.js cli.js hooks-handler.js install-codex.js; do
+for file in index.js cli.js hooks-handler.js cleaner-mcp-server.js install-codex.js; do
   cp "${ADAPTER_DIR}/dist/${file}" "${PACK_TMP_DIR}/package/dist/${file}"
 done
 cp "${REPO_ROOT}/components/products/cli/dist/cli.js" "${PACK_TMP_DIR}/package/dist/lightrsi.js"

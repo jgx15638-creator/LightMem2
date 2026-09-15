@@ -1,8 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
+import {
+  createContextCleanerControlPlane,
+  createContextCleanerControlService,
+  type ContextCleanerControlService,
+  type ContextCleanerHostBridge,
+} from "@lightrsi/cleaner";
+import {
+  applySessionTaskRegistryPatch,
+  createEmptySessionTaskRegistry,
+  persistSessionTaskRegistry,
+} from "@lightrsi/history";
 import {
   assertColdWarmCacheUsage,
   assertProductSurfaceSmoke,
@@ -14,9 +27,16 @@ import {
   startMockCachingJsonUpstream,
   startMockJsonUpstream,
   withTempHome,
+  MODEL_CONTEXT_REWRITE_SCHEMA_VERSION,
 } from "@lightrsi/host-adapter";
 import { readVisualSessionData, readVisualSessionList } from "@lightrsi/product-surface";
-import { MEMORY_FAULT_RECOVER_TOOL_NAME, handleMcpRequest } from "../../../products/mcp/src/index.js";
+import {
+  encodeMcpMessage,
+  MEMORY_FAULT_RECOVER_TOOL_NAME,
+  handleMcpRequest,
+  serveStdioMcpServer,
+  type McpToolHandler,
+} from "../../../products/mcp/src/index.js";
 import { createCodexCliBridge } from "../../../products/cli/src/hosts/codex.js";
 import {
   defaultCodexConfigPath,
@@ -30,6 +50,11 @@ import { installCodexTokenPilot } from "../src/install.js";
 import { processCodexHookEvent } from "../src/hooks-handler.js";
 import { createConsoleLogger } from "../src/logger.js";
 import { startCodexResponsesProxy } from "../src/proxy-runtime.js";
+import {
+  CODEX_CLEANER_MCP_SERVER_NAME,
+  CODEX_CLEAN_TOOL_NAME,
+  createCodexCleanerMcpTool,
+} from "../src/context-cleaner/index.js";
 
 test("Codex host e2e wires install, proxy reduction, report/visual, and MCP recovery together", async (t) => {
   await withTempHome("lightrsi-codex-e2e-", async (homeDir) => {
@@ -280,6 +305,346 @@ test("Codex host e2e wires install, proxy reduction, report/visual, and MCP reco
     assert.equal(Array.isArray(cacheAuditLines[0]?.driftReasons), true);
 
   });
+});
+
+type CleanerMcpMessage = {
+  jsonrpc?: string;
+  id?: string | number | null;
+  method?: string;
+  params?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  error?: { code?: number; message?: string };
+};
+
+type CleanerMcpCallResult = {
+  messages: CleanerMcpMessage[];
+  result: Record<string, unknown>;
+};
+
+async function callCleanerThroughMcp(params: {
+  tool: McpToolHandler;
+  respondToElicitation(message: CleanerMcpMessage): Record<string, unknown>;
+}): Promise<CleanerMcpCallResult> {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const messages: CleanerMcpMessage[] = [];
+  const waiters: Array<() => void> = [];
+  let outputBuffer = "";
+
+  output.setEncoding("utf8");
+  output.on("data", (chunk: string) => {
+    outputBuffer += chunk;
+    for (;;) {
+      const newline = outputBuffer.indexOf("\n");
+      if (newline < 0) break;
+      const line = outputBuffer.slice(0, newline).trim();
+      outputBuffer = outputBuffer.slice(newline + 1);
+      if (line) messages.push(JSON.parse(line) as CleanerMcpMessage);
+    }
+    while (waiters.length > 0) waiters.shift()?.();
+  });
+
+  async function waitFor(
+    predicate: (message: CleanerMcpMessage) => boolean,
+  ): Promise<CleanerMcpMessage> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const found = messages.find(predicate);
+      if (found) return found;
+      if (Date.now() >= deadline) throw new Error("Codex Cleaner MCP response timeout");
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 25);
+        waiters.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+  }
+
+  const server = serveStdioMcpServer({
+    serverInfo: { name: CODEX_CLEANER_MCP_SERVER_NAME, version: "e2e" },
+    tools: [params.tool],
+    input,
+    output,
+  });
+  const send = (message: CleanerMcpMessage) => {
+    input.write(encodeMcpMessage(message));
+  };
+
+  try {
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: { elicitation: { form: {} } },
+        clientInfo: { name: "codex-cleaner-e2e", version: "1" },
+      },
+    });
+    const initialized = await waitFor((message) => message.id === 1);
+    assert.equal(
+      (initialized.result?.serverInfo as { name?: string } | undefined)?.name,
+      CODEX_CLEANER_MCP_SERVER_NAME,
+    );
+
+    send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: CODEX_CLEAN_TOOL_NAME, arguments: {} },
+    });
+    const elicitation = await waitFor((message) => message.method === "elicitation/create");
+    send({
+      jsonrpc: "2.0",
+      id: elicitation.id,
+      result: params.respondToElicitation(elicitation),
+    });
+    const completed = await waitFor((message) => message.id === 2);
+    assert.equal(completed.error, undefined);
+    return {
+      messages,
+      result: completed.result ?? {},
+    };
+  } finally {
+    input.end();
+    await server;
+  }
+}
+
+async function createCleanerE2eFixture(stateDir: string): Promise<{
+  service: ContextCleanerControlService;
+  executeAttempts(): number;
+  successfulSchedules(): number;
+}> {
+  const sessionId = "codex-cleaner-selection-e2e";
+  const span = (turnId: string) => ({
+    firstTurnAbsId: turnId,
+    lastTurnAbsId: turnId,
+    supportingTurnAbsIds: [turnId],
+    lastEstimatorTurnAbsId: turnId,
+  });
+  const registry = applySessionTaskRegistryPatch(createEmptySessionTaskRegistry(sessionId), {
+    upsertTasks: {
+      "task-a": {
+        taskId: "task-a",
+        title: "OAuth refresh regression",
+        objective: "Diagnose OAuth refresh failures",
+        lifecycle: "completed",
+        completionEvidence: ["TASK_A_COMPLETE"],
+        unresolvedQuestions: [],
+        span: span("turn-a"),
+      },
+      "task-b": {
+        taskId: "task-b",
+        title: "Release approval",
+        objective: "Wait for production approval",
+        lifecycle: "active",
+        completionEvidence: [],
+        unresolvedQuestions: ["Production approval is pending"],
+        span: span("turn-b"),
+      },
+      "task-c": {
+        taskId: "task-c",
+        title: "Index migration benchmark",
+        objective: "Validate the event-search index migration",
+        lifecycle: "completed",
+        completionEvidence: ["TASK_C_COMPLETE"],
+        unresolvedQuestions: [],
+        span: span("turn-c"),
+      },
+    },
+    activeTaskIds: ["task-b"],
+    completedTaskIds: ["task-a", "task-c"],
+    evictableTaskIds: ["task-a", "task-c"],
+  });
+  await persistSessionTaskRegistry(stateDir, registry);
+
+  const controlPlane = createContextCleanerControlPlane({
+    stateDir,
+    now: () => "2026-09-13T00:02:00.000Z",
+  });
+  let executeAttempts = 0;
+  let successfulSchedules = 0;
+  const bridge: ContextCleanerHostBridge = {
+    hostId: "codex",
+    rewriteMode: "response_chain_rebase",
+    async listSessions() {
+      return [{ sessionId }];
+    },
+    async readCleanSnapshot(requestedSessionId) {
+      assert.equal(requestedSessionId, sessionId);
+      return {
+        schemaVersion: MODEL_CONTEXT_REWRITE_SCHEMA_VERSION,
+        hostId: "codex",
+        sessionId,
+        revision: "revision-e2e-1",
+        capturedAt: "2026-09-13T00:00:00.000Z",
+        model: "gpt-5.4",
+        tokenCountMode: "exact",
+        tokenCountMethod: "fixture",
+        itemTokenCounts: {
+          "item-a": 120,
+          "item-b": 80,
+          "item-c": 70,
+        },
+        items: [
+          {
+            stableId: "item-a",
+            kind: "assistant",
+            fingerprint: "digest-a",
+            chars: 480,
+            taskIds: ["task-a"],
+          },
+          {
+            stableId: "item-b",
+            kind: "assistant",
+            fingerprint: "digest-b",
+            chars: 320,
+            taskIds: ["task-b"],
+          },
+          {
+            stableId: "item-c",
+            kind: "assistant",
+            fingerprint: "digest-c",
+            chars: 280,
+            taskIds: ["task-c"],
+          },
+        ],
+      };
+    },
+    async executeApprovedClean(request) {
+      executeAttempts += 1;
+      const receipt = await controlPlane.executeApprovedClean(request);
+      if (receipt.status === "scheduled") successfulSchedules += 1;
+      return receipt;
+    },
+    readCleanReceipt(planId) {
+      return controlPlane.readCleanReceipt(planId);
+    },
+    cancelCleanPlan(planId) {
+      return controlPlane.cancelCleanPlan(planId);
+    },
+  };
+  return {
+    service: createContextCleanerControlService({
+      stateDir,
+      bridge,
+      now: () => "2026-09-13T00:01:00.000Z",
+    }),
+    executeAttempts: () => executeAttempts,
+    successfulSchedules: () => successfulSchedules,
+  };
+}
+
+test("Codex Cleaner MCP e2e schedules only the accepted A+C tasks", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-mcp-e2e-"));
+  try {
+    const fixture = await createCleanerE2eFixture(stateDir);
+    const result = await callCleanerThroughMcp({
+      tool: createCodexCleanerMcpTool({
+        service: fixture.service,
+        async resolveSessionId() { return "codex-cleaner-selection-e2e"; },
+      }),
+      respondToElicitation(message) {
+        assert.equal(message.params?.mode, "form");
+        assert.match(String(message.params?.message), /\[-\] task-b/);
+        const schema = message.params?.requestedSchema as {
+          properties?: Record<string, { default?: boolean; description?: string }>;
+        };
+        assert.deepEqual(Object.keys(schema.properties ?? {}), ["task_1", "task_2"]);
+        assert.equal(schema.properties?.task_1?.default, false);
+        assert.equal(schema.properties?.task_2?.default, false);
+        assert.match(schema.properties?.task_1?.description ?? "", /task-a/);
+        assert.match(schema.properties?.task_2?.description ?? "", /task-c/);
+        assert.equal(JSON.stringify(schema).includes("task-b"), false);
+        return {
+          action: "accept",
+          content: { task_1: true, task_2: true },
+        };
+      },
+    });
+
+    const structured = result.result.structuredContent as Record<string, unknown>;
+    assert.equal(result.result.isError, false);
+    assert.deepEqual(structured.selectedTaskIds, ["task-a", "task-c"]);
+    const receipt = await fixture.service.readReceipt(String(structured.planId));
+    assert.equal(receipt?.status, "scheduled");
+    assert.deepEqual(receipt?.selectedTaskIds, ["task-a", "task-c"]);
+    assert.equal(fixture.executeAttempts(), 1);
+    assert.equal(fixture.successfulSchedules(), 1);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex Cleaner MCP e2e cancellation writes no scheduled receipt", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-mcp-cancel-"));
+  try {
+    const fixture = await createCleanerE2eFixture(stateDir);
+    const result = await callCleanerThroughMcp({
+      tool: createCodexCleanerMcpTool({
+        service: fixture.service,
+        async resolveSessionId() { return "codex-cleaner-selection-e2e"; },
+      }),
+      respondToElicitation() {
+        return { action: "cancel" };
+      },
+    });
+
+    const structured = result.result.structuredContent as Record<string, unknown>;
+    assert.equal(structured.status, "cancelled");
+    assert.deepEqual(structured.selectedTaskIds, []);
+    assert.equal((await fixture.service.readReceipt(String(structured.planId)))?.status, "analyzed");
+    assert.equal(fixture.executeAttempts(), 0);
+    assert.equal(fixture.successfulSchedules(), 0);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex Cleaner MCP e2e preserves a scheduled selection on stale-plan conflict", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-mcp-conflict-"));
+  try {
+    const fixture = await createCleanerE2eFixture(stateDir);
+    let primed = false;
+    const conflictingService: ContextCleanerControlService = {
+      ...fixture.service,
+      async approve(planId, selectedTaskIds) {
+        if (!primed) {
+          primed = true;
+          await fixture.service.approve(planId, ["task-a"]);
+        }
+        return fixture.service.approve(planId, selectedTaskIds);
+      },
+    };
+    const result = await callCleanerThroughMcp({
+      tool: createCodexCleanerMcpTool({
+        service: conflictingService,
+        async resolveSessionId() { return "codex-cleaner-selection-e2e"; },
+      }),
+      respondToElicitation() {
+        return {
+          action: "accept",
+          content: { task_1: false, task_2: true },
+        };
+      },
+    });
+
+    const structured = result.result.structuredContent as Record<string, unknown>;
+    assert.equal(result.result.isError, true);
+    assert.equal(structured.error, "clean_approval_scheduled_conflict");
+    assert.deepEqual(structured.selectedTaskIds, ["task-c"]);
+    const receipt = await fixture.service.readReceipt(String(structured.planId));
+    assert.equal(receipt?.status, "scheduled");
+    assert.deepEqual(receipt?.selectedTaskIds, ["task-a"]);
+    assert.equal(fixture.executeAttempts(), 2);
+    assert.equal(fixture.successfulSchedules(), 1);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
 });
 
 test("Codex streaming requests persist response-session mapping before the next turn resolves", async () => {

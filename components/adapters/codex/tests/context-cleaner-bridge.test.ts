@@ -521,6 +521,218 @@ test("Codex cleaner bridge excludes its own active escaped exec-wrapper chain", 
   }
 });
 
+test("Codex cleaner bridge excludes its own active MCP call wrapped by exec", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-mcp-exec-self-call-"));
+  try {
+    const sessionId = "codex-cleaner-mcp-exec-self-call";
+    const codexSessionId = "codex-host-mcp-exec-self-call";
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      payload: { input: [{ role: "user", content: "finished task" }] },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      observedAt: "2026-08-20T00:00:00.000Z",
+      response: {
+        id: "response-1",
+        output: [{ type: "message", role: "assistant", content: "done" }],
+      },
+      status: "completed",
+    });
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-2",
+      payload: {
+        previous_response_id: "response-1",
+        input: [{ role: "user", content: "$lightrsi-clean" }],
+      },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-2",
+      response: {
+        id: "response-2",
+        previous_response_id: "response-1",
+        output: [{
+          type: "custom_tool_call",
+          call_id: "call-clean",
+          name: "exec",
+          input: "text(await tools.mcp__lightrsi_cleaner__lightrsi_clean({}));\n",
+        }],
+      },
+      status: "completed",
+    });
+    await upsertCodexSessionSnapshot(stateDir, sessionId, {
+      codexSessionId,
+      latestResponseId: "response-2",
+      latestModel: "gpt-6-astra",
+    });
+
+    const snapshot = await createCodexContextCleanerBridge({
+      stateDir,
+      controlPlane: fakeControlPlane(),
+      currentCodexSessionId: codexSessionId,
+    }).readCleanSnapshot(sessionId);
+
+    assert.equal(snapshot.items.some((item) => item.kind === "tool_call"), false);
+    assert.equal(JSON.stringify(snapshot.items).includes("lightrsi_clean"), false);
+    assert.equal(snapshot.capturedAt, "2026-08-20T00:00:00.000Z");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex cleaner bridge excludes its own active MCP function-call chain", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-mcp-self-call-"));
+  try {
+    const sessionId = "codex-cleaner-mcp-self-call";
+    const codexSessionId = "codex-host-mcp-self-call";
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      payload: { input: [{ role: "user", content: "finished task" }] },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-1",
+      observedAt: "2026-08-20T00:00:00.000Z",
+      response: {
+        id: "response-1",
+        output: [{ type: "message", role: "assistant", content: "done" }],
+      },
+      status: "completed",
+    });
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-2",
+      payload: {
+        previous_response_id: "response-1",
+        input: [{ role: "user", content: "$lightrsi-clean" }],
+      },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-2",
+      response: {
+        id: "response-2",
+        previous_response_id: "response-1",
+        output: [{
+          type: "function_call",
+          call_id: "mcp__lightrsi_cleaner__lightrsi_clean_1_test",
+          name: "lightrsi_clean",
+          arguments: "{}",
+        }],
+      },
+      status: "completed",
+    });
+    await upsertCodexSessionSnapshot(stateDir, sessionId, {
+      codexSessionId,
+      latestResponseId: "response-2",
+      latestModel: "gpt-5.4",
+    });
+
+    const snapshot = await createCodexContextCleanerBridge({
+      stateDir,
+      controlPlane: fakeControlPlane(),
+      currentCodexSessionId: codexSessionId,
+    }).readCleanSnapshot(sessionId);
+
+    assert.equal(snapshot.items.some((item) => item.kind === "tool_call"), false);
+    assert.equal(JSON.stringify(snapshot.items).includes("lightrsi_clean"), false);
+    assert.equal(snapshot.capturedAt, "2026-08-20T00:00:00.000Z");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("Codex cleaner bridge excludes repeated MCP self-call turns from a stateless replay", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-stateless-self-call-"));
+  try {
+    const sessionId = "codex-cleaner-stateless-self-call";
+    const codexSessionId = "codex-host-stateless-self-call";
+    const priorTask = { type: "message", role: "user", content: "finished task" };
+    const priorAnswer = { type: "message", role: "assistant", content: "done" };
+    const failedCleanCall = {
+      type: "function_call",
+      call_id: "mcp__lightrsi_cleaner__lightrsi_clean_1_failed",
+      name: "lightrsi_clean",
+      arguments: "{}",
+    };
+    const failedCleanOutput = {
+      type: "function_call_output",
+      call_id: "mcp__lightrsi_cleaner__lightrsi_clean_1_failed",
+      output: "codex_clean_snapshot_incomplete",
+    };
+    const replayInput = [
+      priorTask,
+      priorAnswer,
+      { type: "message", role: "user", content: "$lightrsi-clean" },
+      { type: "message", role: "user", content: "<skill><name>lightrsi-clean</name></skill>" },
+      failedCleanCall,
+      failedCleanOutput,
+      { type: "message", role: "assistant", content: "clean failed" },
+      { type: "message", role: "user", content: "$lightrsi-clean" },
+      { type: "message", role: "user", content: "<skill><name>lightrsi-clean</name></skill>" },
+    ];
+    await appendCodexRequestJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-stateless",
+      observedAt: "2026-08-20T00:01:00.000Z",
+      payload: { input: replayInput },
+      status: "completed",
+    });
+    await appendCodexResponseJournalEntry({
+      stateDir,
+      sessionId,
+      requestId: "request-stateless",
+      response: {
+        id: "response-stateless",
+        previous_response_id: null,
+        output: [{
+          type: "function_call",
+          call_id: "mcp__lightrsi_cleaner__lightrsi_clean_2_active",
+          name: "lightrsi_clean",
+          arguments: "{}",
+        }],
+      },
+      status: "completed",
+    });
+    await upsertCodexSessionSnapshot(stateDir, sessionId, {
+      codexSessionId,
+      latestResponseId: "response-stateless",
+      latestModel: "kimi-k2.7-code",
+    });
+
+    const snapshot = await createCodexContextCleanerBridge({
+      stateDir,
+      controlPlane: fakeControlPlane(),
+      currentCodexSessionId: codexSessionId,
+    }).readCleanSnapshot(sessionId);
+
+    assert.equal(snapshot.items.length, 2);
+    assert.equal(snapshot.items.some((item) => item.kind === "tool_call"), false);
+    assert.equal(snapshot.items.some((item) => item.kind === "tool_result"), false);
+    assert.equal(snapshot.capturedAt, "2026-08-20T00:01:00.000Z");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("Codex cleaner session catalog sorts valid sessions and isolates malformed entries", async () => {
   const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-codex-cleaner-catalog-"));
   try {

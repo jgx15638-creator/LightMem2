@@ -6,6 +6,7 @@ async function main() {
       index: "src/index.ts",
       cli: "src/cli.ts",
       "hooks-handler": "src/hooks-handler.ts",
+      "cleaner-mcp-server": "src/cleaner-mcp-server.ts",
       "install-codex": "scripts/install-codex.ts",
     },
     bundle: true,

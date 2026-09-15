@@ -50,7 +50,17 @@ try {
   assert.equal(manifest.version, expectedVersion);
   assert.equal(manifest.dependencies, undefined);
   assert.equal(manifest.devDependencies, undefined);
-  for (const file of ["index.js", "cli.js", "hooks-handler.js", installEntry, "lightrsi.js", "lightmem2.js", "mcp-server.js"]) {
+  const requiredDistFiles = [
+    "index.js",
+    "cli.js",
+    "hooks-handler.js",
+    installEntry,
+    "lightrsi.js",
+    "lightmem2.js",
+    "mcp-server.js",
+  ];
+  if (host === "codex") requiredDistFiles.push("cleaner-mcp-server.js");
+  for (const file of requiredDistFiles) {
     await readFile(join(distDir, file));
   }
 
@@ -92,6 +102,12 @@ try {
     : "hooks-handler.js";
   assert.match(installedConfig, new RegExp(`${normalizedDistDir}/${hookEntry}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(installedConfig, new RegExp(`${normalizedDistDir}/mcp-server.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  if (host === "codex") {
+    assert.match(
+      installedConfig,
+      new RegExp(`${normalizedDistDir}/cleaner-mcp-server.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+  }
 
   await assertInstalledBin(join(binDir, "lightrsi"), join(distDir, "lightrsi.js"));
   await assertInstalledBin(join(binDir, "lightmem2"), join(distDir, "lightrsi.js"));
@@ -128,14 +144,21 @@ try {
   const skill = (await readFile(join(skillsRoot, "lightrsi-doctor", "SKILL.md"), "utf8")).replace(/\\+/g, "/");
   assert.match(skill, new RegExp(`${normalizedDistDir}/lightrsi.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   const cleanerSkill = (await readFile(join(skillsRoot, "lightrsi-clean", "SKILL.md"), "utf8")).replace(/\\+/g, "/");
-  assert.match(cleanerSkill, new RegExp(`^   lightrsi ${host} clean$`, "m"));
-  assert.ok(
-    cleanerSkill.indexOf(normalizedDistDir) < cleanerSkill.indexOf(`   lightrsi ${host} clean`),
-    "installed skill must prefer the version-pinned bundled CLI",
-  );
-  assert.doesNotMatch(cleanerSkill, new RegExp(`^   lightrsi ${host} clean\\s+--`, "m"));
-  assert.match(cleanerSkill, /Never choose task IDs, item IDs, item digests, or deletion ranges/);
-  assert.match(cleanerSkill, /Never answer the confirmation prompt or run a follow-up command/);
+  if (host === "codex") {
+    assert.match(cleanerSkill, /Call `lightrsi_cleaner\.lightrsi_clean` exactly once with an empty input object/);
+    assert.match(cleanerSkill, /Do not run a shell command or invoke the LightRSI CLI/);
+    assert.match(cleanerSkill, /Do not supply, infer, or rewrite plan IDs, task IDs, item IDs, item digests, or deletion ranges/);
+    assert.doesNotMatch(cleanerSkill, /^\s*lightrsi codex clean(?:\s|$)/m);
+  } else {
+    assert.match(cleanerSkill, new RegExp(`^   lightrsi ${host} clean$`, "m"));
+    assert.ok(
+      cleanerSkill.indexOf(normalizedDistDir) < cleanerSkill.indexOf(`   lightrsi ${host} clean`),
+      "installed skill must prefer the version-pinned bundled CLI",
+    );
+    assert.doesNotMatch(cleanerSkill, new RegExp(`^   lightrsi ${host} clean\\s+--`, "m"));
+    assert.match(cleanerSkill, /Never choose task IDs, item IDs, item digests, or deletion ranges/);
+    assert.match(cleanerSkill, /Never answer the confirmation prompt or run a follow-up command/);
+  }
   const cleanerStatusSkill = (await readFile(join(skillsRoot, "lightrsi-clean-status", "SKILL.md"), "utf8")).replace(/\\+/g, "/");
   assert.match(cleanerStatusSkill, new RegExp(`^   lightrsi ${host} clean --status <plan-id>$`, "m"));
   assert.match(cleanerStatusSkill, new RegExp(`${normalizedDistDir}/lightrsi.js`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

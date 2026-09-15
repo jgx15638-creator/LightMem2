@@ -245,7 +245,7 @@ test("real OpenClaw clean dispatch applies a canonical plan immediately", async 
       "task-completed",
     ]);
     assert.match(result.text, /Context clean applied/);
-    assert.match(result.text, /Released:/);
+    assert.match(result.text, /Applied savings:/);
   } finally {
     if (originalConfigPath === undefined) delete process.env.OPENCLAW_CONFIG_PATH;
     else process.env.OPENCLAW_CONFIG_PATH = originalConfigPath;

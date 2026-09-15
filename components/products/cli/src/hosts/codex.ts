@@ -32,7 +32,7 @@ import {
 import {
   readRecentCodexCacheAuditRecordsForSession,
 } from "../../../../adapters/codex/src/cache-audit.js";
-import { createCodexContextCleanerBridge } from "../../../../adapters/codex/src/context-cleaner/index.js";
+import { createCodexContextCleanerControlService } from "../../../../adapters/codex/src/context-cleaner/index.js";
 import {
   renderCodexSessionReport,
   resolveCodexSessionTopology,
@@ -47,7 +47,7 @@ import {
 import { handleStandaloneVisualCommandWithSelection } from "./visual.js";
 import type { CliHostPathOverrides } from "../context-store.js";
 import type { CleanCommandBackend } from "../clean.js";
-import { createHostCleanCommandBackend } from "./cleaner.js";
+import { createCleanCommandBackendFromControlService } from "./cleaner.js";
 
 const CODEX_REDUCTION_PASS_NAMES = [
   "readStateCompaction",
@@ -79,24 +79,10 @@ export async function createCodexCleanCommandBackend(
   const config = await loadTokenPilotCodexConfig(resolveCodexPaths(pathOverrides).tokenPilotConfigPath);
   const stateDir = resolveCodexStateDir(config as unknown as Record<string, unknown>);
   if (!stateDir) return undefined;
-  return createHostCleanCommandBackend({
-    stateDir,
-    recommendationEnabled: config.taskStateEstimator.enabled,
-    recommendationConfig: {
-      baseUrl: config.taskStateEstimator.baseUrl,
-      apiKey: config.taskStateEstimator.apiKey,
-      model: config.taskStateEstimator.model,
-      requestTimeoutMs: config.taskStateEstimator.requestTimeoutMs,
-    },
-    createBridge(controlPlane) {
-      return createCodexContextCleanerBridge({
-        stateDir,
-        controlPlane,
-        currentCodexSessionId: process.env.CODEX_SESSION_ID?.trim()
-          || process.env.CODEX_THREAD_ID?.trim(),
-      });
-    },
+  const control = await createCodexContextCleanerControlService({
+    tokenPilotConfigPath: resolveCodexPaths(pathOverrides).tokenPilotConfigPath,
   });
+  return createCleanCommandBackendFromControlService(control.service);
 }
 
 async function writeConfig(nextConfig: Record<string, unknown>, pathOverrides?: CliHostPathOverrides): Promise<void> {

@@ -147,6 +147,7 @@ test("installCodexTokenPilot writes provider, MCP, and hooks with expected comma
     assert.match(codexToml, /\[model_providers\.OPENAI\][\s\S]*base_url = "http:\/\/127\.0\.0\.1:\d+\/v1"/);
     assert.doesNotMatch(codexToml, /\[model_providers\.tokenpilot\]/);
     assert.match(codexToml, /\[mcp_servers\.tokenpilot_memory_fault_recover\]/);
+    assert.match(codexToml, /\[mcp_servers\.lightrsi_cleaner\]/);
     assert.match(codexToml, /startup_timeout_sec\s*=\s*90/);
     assert.equal(codexToml.includes(`command = ${JSON.stringify(result.expectedMcpCommand)}`), true);
     assert.equal(result.expectedMcpArgs.length, 1);
@@ -157,6 +158,22 @@ test("installCodexTokenPilot writes provider, MCP, and hooks with expected comma
     assert.equal(result.expectedMcpStartupTimeoutSec, 90);
     assert.equal(result.mcpProbe.ok, true);
     assert.equal(result.mcpProbe.degraded, false);
+    assert.equal(result.cleanerMcpServerName, "lightrsi_cleaner");
+    assert.equal(result.expectedCleanerMcpArgs.length, 1);
+    assert.match(result.expectedCleanerMcpArgs[0] ?? "", /dist[\/\\]cleaner-mcp-server\.js$/);
+    assert.match(
+      codexToml,
+      /\[mcp_servers\.lightrsi_cleaner\][\s\S]*?env_vars = \["LIGHTRSI_TASK_STATE_ESTIMATOR_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy", "NODE_USE_ENV_PROXY"\]/,
+    );
+    assert.equal(
+      codexToml.includes(`TOKENPILOT_CODEX_CONFIG = ${JSON.stringify(tokenPilotConfigPath)}`),
+      true,
+    );
+    for (const arg of result.expectedCleanerMcpArgs) {
+      assert.equal(codexToml.includes(JSON.stringify(arg)), true);
+    }
+    assert.equal(result.cleanerMcpProbe.ok, true);
+    assert.equal(result.cleanerMcpProbe.degraded, false);
     assert.equal(result.activeProviderName, "OPENAI");
     assert.equal(result.providerName, "OPENAI");
     assert.deepEqual(result.commandSkillNames, [
@@ -174,11 +191,24 @@ test("installCodexTokenPilot writes provider, MCP, and hooks with expected comma
     assert.equal(result.cliBinDir, cliBinDir);
     assert.equal(result.cliBinDirOnPath, false);
     assert.equal(result.hostCliBinPath, join(cliBinDir, "tokenpilot-codex"));
+    assert.equal(result.cleanCliBinPath, join(cliBinDir, "lightrsi-clean"));
     assert.equal(result.cliLauncherPath, process.platform === "win32" ? join(cliBinDir, "lightrsi.cmd") : undefined);
     assert.equal(result.hostCliLauncherPath, process.platform === "win32" ? join(cliBinDir, "tokenpilot-codex.cmd") : undefined);
+    assert.equal(
+      result.cleanCliLauncherPath,
+      process.platform === "win32" ? join(cliBinDir, "lightrsi-clean.cmd") : undefined,
+    );
     const allowRegularFile = process.platform === "win32";
     await assertInstalledCliLink(result.cliBinPath, /products[\/\\]cli[\/\\]dist[\/\\]cli\.js$/, allowRegularFile);
     await assertInstalledCliLink(result.hostCliBinPath!, /adapters[\/\\]codex[\/\\]dist[\/\\]cli\.js$/, allowRegularFile);
+    assert.equal((await stat(result.cleanCliBinPath!)).isFile(), true);
+    if (result.cleanCliLauncherPath) {
+      assert.equal((await stat(result.cleanCliLauncherPath)).isFile(), true);
+      assert.match(
+        await readFile(join(cliBinDir, "lightrsi-clean.ps1"), "utf8"),
+        /LIGHTRSI_WINDOWS_CONSOLE_INPUT = '1'/,
+      );
+    }
     const tokenPilotConfig = await loadTokenPilotCodexConfig(tokenPilotConfigPath);
     assert.equal(tokenPilotConfig.enabled, true);
     assert.equal(tokenPilotConfig.upstreamProvider, "OPENAI");
@@ -204,15 +234,12 @@ test("installCodexTokenPilot writes provider, MCP, and hooks with expected comma
     const policyRaw = await readFile(join(result.commandSkillsDir, "lightrsi-report", "agents", "openai.yaml"), "utf8");
     assert.match(policyRaw, /allow_implicit_invocation:\s*false/);
     const cleanSkillRaw = await readFile(join(result.commandSkillsDir, "lightrsi-clean", "SKILL.md"), "utf8");
-    assert.match(cleanSkillRaw, /^   lightrsi codex clean$/m);
-    assert.ok(
-      cleanSkillRaw.indexOf("   node ") < cleanSkillRaw.indexOf("   lightrsi codex clean"),
-      "the skill must prefer its version-pinned bundled CLI over an older PATH command",
-    );
-    assert.doesNotMatch(cleanSkillRaw, /^   lightrsi codex clean\s+--/m);
-    assert.match(cleanSkillRaw, /Never choose task IDs, item IDs, item digests, or deletion ranges/);
-    assert.match(cleanSkillRaw, /Never add `--plan`, `--select`, `--status`, or `--cancel`/);
-    assert.match(cleanSkillRaw, /Never answer the confirmation prompt/);
+    assert.match(cleanSkillRaw, /`lightrsi_cleaner\.lightrsi_clean`/);
+    assert.match(cleanSkillRaw, /exactly once/i);
+    assert.match(cleanSkillRaw, /return the tool result/i);
+    assert.match(cleanSkillRaw, /do not run (?:a )?shell command/i);
+    assert.doesNotMatch(cleanSkillRaw, /^   node /m);
+    assert.doesNotMatch(cleanSkillRaw, /^   lightrsi codex clean/m);
     const cleanPolicyRaw = await readFile(join(result.commandSkillsDir, "lightrsi-clean", "agents", "openai.yaml"), "utf8");
     assert.match(cleanPolicyRaw, /allow_implicit_invocation:\s*false/);
     await assert.rejects(stat(legacySkillDir), { code: "ENOENT" });
@@ -513,8 +540,49 @@ test("installCodexTokenPilot rewrites the MCP server block idempotently", async 
     });
 
     const codexToml = await readFile(codexConfigPath, "utf8");
-    const envHeaders = codexToml.match(/\[mcp_servers\.tokenpilot_memory_fault_recover\.env\]/g) ?? [];
-    assert.equal(envHeaders.length, 1);
+    const recoveryHeaders = codexToml.match(/\[mcp_servers\.tokenpilot_memory_fault_recover\]/g) ?? [];
+    const recoveryEnvHeaders = codexToml.match(/\[mcp_servers\.tokenpilot_memory_fault_recover\.env\]/g) ?? [];
+    const cleanerHeaders = codexToml.match(/\[mcp_servers\.lightrsi_cleaner\]/g) ?? [];
+    const cleanerEnvHeaders = codexToml.match(/\[mcp_servers\.lightrsi_cleaner\.env\]/g) ?? [];
+    const cleanerEstimatorEnvVars = codexToml.match(
+      /env_vars = \["LIGHTRSI_TASK_STATE_ESTIMATOR_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy", "NODE_USE_ENV_PROXY"\]/g,
+    ) ?? [];
+    assert.equal(recoveryHeaders.length, 1);
+    assert.equal(recoveryEnvHeaders.length, 1);
+    assert.equal(cleanerHeaders.length, 1);
+    assert.equal(cleanerEnvHeaders.length, 1);
+    assert.equal(cleanerEstimatorEnvVars.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("installCodexTokenPilot preserves Codex TUI animation settings", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lightrsi-codex-install-tui-animations-"));
+  try {
+    const codexConfigPath = join(dir, "config.toml");
+    const hooksConfigPath = join(dir, "hooks.json");
+    const tokenPilotConfigPath = join(dir, "tokenpilot.json");
+    await writeFile(codexConfigPath, [
+      "model_provider = \"OPENAI\"",
+      "",
+      "[tui]",
+      "animations = true",
+      "alternate_screen = false",
+      "",
+    ].join("\n"), "utf8");
+
+    await installCodexTokenPilot({
+      codexConfigPath,
+      hooksConfigPath,
+      tokenPilotConfigPath,
+      installHooks: false,
+      probeMcp: false,
+    });
+
+    const codexToml = await readFile(codexConfigPath, "utf8");
+    assert.match(codexToml, /^animations\s*=\s*true$/m);
+    assert.match(codexToml, /^alternate_screen\s*=\s*false$/m);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

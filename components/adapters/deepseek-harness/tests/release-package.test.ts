@@ -17,13 +17,20 @@ const tarCommand = process.platform === "win32"
 test("packed DSH bundle resolves through its package entry", async () => {
   const root = await mkdtemp(join(tmpdir(), "lightrsi-dsh-release-"));
   try {
-    const packed = await execFileAsync("npm", [
+    const npmArgs = [
       "pack",
       "--ignore-scripts",
       "--json",
       "--pack-destination",
       root,
-    ], { cwd: packageDir });
+    ];
+    const packed = process.platform === "win32"
+      ? await execFileAsync(
+        process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+        ["/d", "/s", "/c", "npm.cmd", ...npmArgs],
+        { cwd: packageDir },
+      )
+      : await execFileAsync("npm", npmArgs, { cwd: packageDir });
     const result = JSON.parse(packed.stdout) as Array<{ filename: string }>;
     const archive = join(root, result[0]!.filename);
     const installedDir = join(

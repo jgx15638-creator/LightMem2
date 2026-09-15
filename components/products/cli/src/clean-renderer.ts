@@ -39,14 +39,97 @@ export type CleanReceiptView = {
   reasons: string[];
 };
 
+export type CleanPlanRenderOptions = {
+  maxWidth?: number;
+};
+
 function count(tokens: number | null, chars: number): string {
   return tokens === null ? `${chars} chars` : `${tokens} tok`;
 }
 
+function characterWidth(value: string): number {
+  const codePoint = value.codePointAt(0) ?? 0;
+  if (/\p{Mark}/u.test(value)) return 0;
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f
+    || codePoint === 0x2329
+    || codePoint === 0x232a
+    || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+    || (codePoint >= 0xff00 && codePoint <= 0xff60)
+    || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+    || (codePoint >= 0x1f300 && codePoint <= 0x1faff)
+    || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  ) ? 2 : 1;
+}
+
+export function terminalDisplayWidth(value: string): number {
+  let width = 0;
+  for (const character of value) width += characterWidth(character);
+  return width;
+}
+
+export function truncateTerminalText(value: string, maxWidth: number): string {
+  if (terminalDisplayWidth(value) <= maxWidth) return value;
+  if (maxWidth <= 0) return "";
+  const suffix = maxWidth >= 3 ? "..." : ".".repeat(maxWidth);
+  let result = "";
+  let width = 0;
+  for (const character of value) {
+    const nextWidth = characterWidth(character);
+    if (width + nextWidth + suffix.length > maxWidth) break;
+    result += character;
+    width += nextWidth;
+  }
+  return `${result}${suffix}`;
+}
+
 function cell(value: string, width: number): string {
-  return value.length > width
-    ? `${value.slice(0, Math.max(0, width - 3))}...`
-    : value.padEnd(width);
+  const truncated = truncateTerminalText(value, width);
+  return `${truncated}${" ".repeat(Math.max(0, width - terminalDisplayWidth(truncated)))}`;
+}
+
+function fitTableWidths(desired: number[], maxWidth?: number): number[] {
+  if (maxWidth === undefined) return desired;
+  const widths = [...desired];
+  const minimums = [3, 4, 11, 4, 5, 6, 6];
+  const separatorsWidth = (widths.length - 1) * 2;
+  while (widths.reduce((total, width) => total + width, separatorsWidth) > maxWidth) {
+    let shrinkIndex = -1;
+    let largestSurplus = 0;
+    for (let index = 0; index < widths.length; index += 1) {
+      const surplus = widths[index]! - minimums[index]!;
+      if (surplus > largestSurplus) {
+        largestSurplus = surplus;
+        shrinkIndex = index;
+      }
+    }
+    if (shrinkIndex < 0) break;
+    widths[shrinkIndex]! -= 1;
+  }
+  return widths;
+}
+
+function wrapTerminalLine(value: string, maxWidth?: number): string[] {
+  if (maxWidth === undefined || terminalDisplayWidth(value) <= maxWidth) return [value];
+  const lines: string[] = [];
+  let line = "";
+  let width = 0;
+  for (const character of value) {
+    const nextWidth = characterWidth(character);
+    if (line && width + nextWidth > maxWidth) {
+      lines.push(line);
+      line = "";
+      width = 0;
+    }
+    line += character;
+    width += nextWidth;
+  }
+  if (line || lines.length === 0) lines.push(line);
+  return lines;
 }
 
 function risk(task: CleanTaskView): string {
@@ -70,7 +153,10 @@ export function estimateCleanSelection(plan: CleanPlanView, selectedTaskIds: rea
   };
 }
 
-export function renderCleanPlan(plan: CleanPlanView): string {
+export function renderCleanPlan(plan: CleanPlanView, options: CleanPlanRenderOptions = {}): string {
+  const maxWidth = options.maxWidth === undefined
+    ? undefined
+    : Math.max(1, Math.floor(options.maxWidth));
   const rows = plan.tasks.map((task) => [
     task.selectable ? "[ ]" : "[-]",
     task.taskId,
@@ -80,16 +166,19 @@ export function renderCleanPlan(plan: CleanPlanView): string {
     task.recommendation,
     risk(task),
   ]);
-  const widths = [
+  const widths = fitTableWidths([
     3,
-    Math.max(18, "TASK".length, ...plan.tasks.map((task) => task.taskId.length)),
+    Math.max(18, "TASK".length, ...plan.tasks.map((task) => terminalDisplayWidth(task.taskId))),
     22,
     10,
     7,
     9,
     17,
-  ];
-  const format = (row: string[]) => row.map((value, index) => cell(value, widths[index]!)).join("  ").trimEnd();
+  ], maxWidth);
+  const format = (row: string[]) => truncateTerminalText(
+    row.map((value, index) => cell(value, widths[index]!)).join("  ").trimEnd(),
+    maxWidth ?? Number.POSITIVE_INFINITY,
+  );
   const recommendedTaskIds = plan.tasks
     .filter((task) => task.selectable && task.recommendation === "clean")
     .map((task) => task.taskId);
@@ -97,7 +186,7 @@ export function renderCleanPlan(plan: CleanPlanView): string {
   const usage = plan.contextWindowTokens !== undefined && plan.contextWindowTokens > 0 && plan.usedTokens !== null
     ? `${plan.usedTokens} / ${plan.contextWindowTokens} tok (${(plan.usedTokens / plan.contextWindowTokens * 100).toFixed(1)}%)`
     : count(plan.usedTokens, plan.usedChars);
-  return [
+  const lines = [
     `Context clean plan ${plan.planId}`,
     `Host/session: ${plan.hostId} / ${plan.sessionId}`,
     `Context usage: ${usage} (${plan.tokenCountMode})`,
@@ -117,7 +206,8 @@ export function renderCleanPlan(plan: CleanPlanView): string {
       .map((task) => `- ${task.taskId}: ${task.reasonCodes.join(", ")}`),
     "",
     `Recommended selection estimate: ${count(recommended.tokens, recommended.chars)}`,
-  ].join("\n");
+  ];
+  return lines.flatMap((line) => wrapTerminalLine(line, maxWidth)).join("\n");
 }
 
 export function renderCleanReceipt(receipt: CleanReceiptView): string {

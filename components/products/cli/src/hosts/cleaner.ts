@@ -1,11 +1,10 @@
 import {
-  CONTEXT_CLEAN_SCHEMA_VERSION,
-  analyzeContextCleanSession,
   createApiContextCleanRecommendationProvider,
+  createContextCleanerControlService,
   createContextCleanerControlPlane,
-  readContextCleanPlan,
   type ContextCleanPlan,
   type ContextCleanReceipt,
+  type ContextCleanerControlService,
   type ContextCleanerControlPlane,
   type ContextCleanerHostBridge,
 } from "@lightrsi/cleaner";
@@ -64,10 +63,6 @@ function receiptView(receipt: ContextCleanReceipt): CleanReceiptView {
   };
 }
 
-function storeFailure(operation: string, reasons: string[]): never {
-  throw new Error(`${operation}:${reasons.join(",") || "unknown"}`);
-}
-
 export function createHostCleanCommandBackend(params: {
   stateDir: string;
   createBridge(controlPlane: ContextCleanerControlPlane): ContextCleanerHostBridge;
@@ -83,60 +78,37 @@ export function createHostCleanCommandBackend(params: {
   const provider = params.recommendationEnabled === false
     ? undefined
     : createApiContextCleanRecommendationProvider(params.recommendationConfig);
+  const service = createContextCleanerControlService({
+    stateDir,
+    bridge,
+    recommendationProvider: provider,
+    contextWindowTokens: params.contextWindowTokens,
+    now: params.now,
+  });
 
-  async function storedPlan(planId: string): Promise<ContextCleanPlan | undefined> {
-    const result = await readContextCleanPlan({ stateDir, planId });
-    if (result.bypassed) storeFailure("clean_cli_plan_unavailable", result.reasons);
-    return result.value?.plan;
-  }
+  return createCleanCommandBackendFromControlService(service);
+}
 
+export function createCleanCommandBackendFromControlService(
+  service: ContextCleanerControlService,
+): CleanCommandBackend {
   return {
     async analyze(sessionId) {
-      return planView((await analyzeContextCleanSession({
-        stateDir,
-        bridge,
-        sessionId,
-        provider,
-        contextWindowTokens: params.contextWindowTokens,
-      })).plan);
+      return planView(await service.analyze(sessionId));
     },
     async readPlan(planId) {
-      const plan = await storedPlan(planId);
+      const plan = await service.readPlan(planId);
       return plan ? planView(plan) : undefined;
     },
     async approve(planId, selectedTaskIds) {
-      const plan = await storedPlan(planId);
-      if (!plan) throw new Error(`clean_cli_plan_missing:${planId}`);
-      if (new Set(selectedTaskIds).size !== selectedTaskIds.length) {
-        throw new Error("clean_cli_selection_duplicate_task");
-      }
-      const tasksById = new Map(plan.tasks.map((task) => [task.taskId, task]));
-      const selectedTasks = selectedTaskIds.map((taskId) => {
-        const task = tasksById.get(taskId);
-        if (!task) throw new Error(`clean_cli_selection_unknown_task:${taskId}`);
-        if (!task.selectable) throw new Error(`clean_cli_selection_task_protected:${taskId}`);
-        return {
-          taskId,
-          itemIds: [...task.itemIds],
-          itemDigests: { ...task.itemDigests },
-        };
-      });
-      return receiptView(await bridge.executeApprovedClean({
-        schemaVersion: CONTEXT_CLEAN_SCHEMA_VERSION,
-        cleanPlanId: plan.planId,
-        hostId: plan.hostId,
-        sessionId: plan.sessionId,
-        baseRevision: plan.baseRevision,
-        approvedAt: params.now?.() ?? new Date().toISOString(),
-        selectedTasks,
-      }));
+      return receiptView(await service.approve(planId, selectedTaskIds));
     },
     async readReceipt(planId) {
-      const receipt = await bridge.readCleanReceipt(planId);
+      const receipt = await service.readReceipt(planId);
       return receipt ? receiptView(receipt) : undefined;
     },
     async cancel(planId) {
-      return receiptView(await bridge.cancelCleanPlan(planId));
+      return receiptView(await service.cancel(planId));
     },
   };
 }

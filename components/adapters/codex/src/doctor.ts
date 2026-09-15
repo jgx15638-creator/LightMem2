@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   DEFAULT_TOKENPILOT_MCP_STARTUP_TIMEOUT_SEC,
   inspectTokenPilotMcpHealth,
@@ -35,7 +36,12 @@ import {
   type CodexCleanerObservability,
 } from "./context-cleaner/observability.js";
 import { readDaemonStatus } from "./daemon.js";
-import { resolveCodexHookCommandForInstall, resolveCodexMcpServerSpecForInstall } from "./install.js";
+import { CODEX_CLEANER_MCP_SERVER_NAME } from "./context-cleaner/mcp-selection.js";
+import {
+  resolveCodexCleanerMcpServerSpecForInstall,
+  resolveCodexHookCommandForInstall,
+  resolveCodexMcpServerSpecForInstall,
+} from "./install.js";
 import { resolveLatestCodexSessionId } from "./session-state.js";
 
 export type CodexDoctorReport = {
@@ -46,6 +52,8 @@ export type CodexDoctorReport = {
   expectedHookCommand: string;
   expectedMcpCommand: string;
   expectedMcpArgs: string[];
+  expectedCleanerMcpCommand?: string;
+  expectedCleanerMcpArgs?: string[];
   providerInstalled: boolean;
   providerActive: boolean;
   providerIntercepted: boolean;
@@ -69,6 +77,14 @@ export type CodexDoctorReport = {
   adapterEnabled: boolean;
   coreRuntimeHealthy: boolean;
   recoveryMcpHealthy: boolean;
+  cleanerMcpInstalled?: boolean;
+  cleanerMcpStateDirMatches?: boolean;
+  cleanerMcpCommandMatches?: boolean;
+  cleanerMcpArgsMatch?: boolean;
+  cleanerMcpStartupTimeoutSecMatches?: boolean;
+  cleanerMcpHealthy?: boolean;
+  cleanCliInstalled?: boolean;
+  cleanCliLauncherInstalled?: boolean;
   degradedMode: boolean;
   rebaseCapabilityStatus?: string[];
   rebaseCapabilityTrusted?: boolean;
@@ -95,6 +111,7 @@ export type CodexMcpServerDiagnostic = {
   commandConfigured: boolean;
   argsCount: number;
   envKeys: string[];
+  forwardedEnvKeys: string[];
   startupTimeoutSec?: number;
 };
 
@@ -152,6 +169,7 @@ export function codexMcpServerDiagnostic(
     commandConfigured: Boolean(server?.command),
     argsCount: server?.args.length ?? 0,
     envKeys: Object.keys(server?.env ?? {}).sort(),
+    forwardedEnvKeys: [...(server?.envVars ?? [])].sort(),
     startupTimeoutSec: server?.startupTimeoutSec,
   };
 }
@@ -180,6 +198,7 @@ export function formatCodexDoctorReport(report: CodexDoctorReport): string {
     missingFields: [],
   };
   const rebaseCapabilityStatus = report.rebaseCapabilityStatus ?? [];
+  const expectedCleanerMcpArgs = report.expectedCleanerMcpArgs ?? [];
   const rebaseCapabilitySummary = report.rebaseCapabilityTrusted === false
     ? `untrusted (${report.rebaseCapabilityIssue ?? "read or validation error"}); runtime will bypass rebase`
     : rebaseCapabilityStatus.length > 0
@@ -198,6 +217,7 @@ export function formatCodexDoctorReport(report: CodexDoctorReport): string {
     `- adapter enabled: ${report.adapterEnabled ? "yes" : "no"}`,
     `- core runtime healthy: ${report.coreRuntimeHealthy ? "yes" : "no"}`,
     `- recovery MCP healthy: ${report.recoveryMcpHealthy ? "yes" : "no"}`,
+    `- Cleaner MCP healthy: ${report.cleanerMcpHealthy ? "yes" : "no"}`,
     `- degraded mode: ${report.degradedMode ? "yes" : "no"}`,
     `- provider installed: ${report.providerInstalled ? "yes" : "no"}`,
     `- active provider selected: ${report.providerActive ? "yes" : "no"}`,
@@ -207,6 +227,11 @@ export function formatCodexDoctorReport(report: CodexDoctorReport): string {
     `- ChatGPT Codex backend routing configured: ${report.chatGptBackendRoutingConfigured ? "yes" : "no"}`,
     `- Responses WebSocket routing configured: ${report.responsesWebSocketRoutingConfigured ? "yes" : "no"}`,
     `- recovery MCP installed: ${report.mcpInstalled ? "yes" : "no"}`,
+    `- Cleaner MCP installed: ${report.cleanerMcpInstalled ? "yes" : "no"}`,
+    `- Cleaner TTY command installed: ${report.cleanCliInstalled ? "yes" : "no"}`,
+    `- Cleaner TTY Windows launcher installed: ${report.cleanCliLauncherInstalled === undefined ? "n/a" : report.cleanCliLauncherInstalled ? "yes" : "no"}`,
+    `- expected Cleaner MCP command: ${report.expectedCleanerMcpCommand ?? "(unset)"}`,
+    `- expected Cleaner MCP args: ${expectedCleanerMcpArgs.length > 0 ? expectedCleanerMcpArgs.join(" ") : "(none)"}`,
     `- hooks installed: ${report.hooksInstalled ? "yes" : "no"}`,
     `- hooks complete: ${report.hooksComplete ? "yes" : "no"}`,
     `- hooks match expected command: ${report.hooksMatchExpectedCommand ? "yes" : "no"}`,
@@ -216,6 +241,10 @@ export function formatCodexDoctorReport(report: CodexDoctorReport): string {
     `- recovery MCP command matches: ${report.mcpCommandMatches ? "yes" : "no"}`,
     `- recovery MCP args match: ${report.mcpArgsMatch ? "yes" : "no"}`,
     `- recovery MCP startup timeout matches: ${report.mcpStartupTimeoutSecMatches ? "yes" : "no"}`,
+    `- Cleaner MCP stateDir matches: ${report.cleanerMcpStateDirMatches ? "yes" : "no"}`,
+    `- Cleaner MCP command matches: ${report.cleanerMcpCommandMatches ? "yes" : "no"}`,
+    `- Cleaner MCP args match: ${report.cleanerMcpArgsMatch ? "yes" : "no"}`,
+    `- Cleaner MCP startup timeout matches: ${report.cleanerMcpStartupTimeoutSecMatches ? "yes" : "no"}`,
     `- daemon running: ${report.daemonRunning ? "yes" : "no"}`,
     `- proxy healthy: ${report.proxyHealthy ? "yes" : "no"}`,
     `- proxy base URL: ${sanitizeDiagnosticUrl(report.proxyBaseUrl) ?? "(unset)"}`,
@@ -263,6 +292,18 @@ export function formatCodexDoctorReport(report: CodexDoctorReport): string {
   if (report.mcpInstalled && !report.mcpStartupTimeoutSecMatches) {
     fixes.push("- rerun the Codex install command or set `startup_timeout_sec` on `tokenpilot_memory_fault_recover` to the expected value");
   }
+  if (
+    !report.cleanerMcpInstalled
+    || !report.cleanerMcpStateDirMatches
+    || !report.cleanerMcpCommandMatches
+    || !report.cleanerMcpArgsMatch
+    || !report.cleanerMcpStartupTimeoutSecMatches
+  ) {
+    fixes.push("- rerun the Codex install command to refresh the Cleaner MCP entry in `config.toml`");
+  }
+  if (report.cleanCliInstalled === false || report.cleanCliLauncherInstalled === false) {
+    fixes.push("- rerun the Codex install command to restore the `lightrsi-clean` TTY command");
+  }
   if (report.adapterEnabled && (!report.daemonRunning || !report.proxyHealthy)) {
     fixes.push("- trust the TokenPilot hooks in Codex, then start a new session so SessionStart can boot the local proxy");
     fixes.push("- if the proxy is still unhealthy after a new session starts, run `tokenpilot-codex start` or `tokenpilot-codex restart`");
@@ -292,12 +333,18 @@ export async function inspectCodexDoctor(params: {
   configPath: string;
   tokenPilotConfigPath: string;
   hooksConfigPath: string;
+  cliBinDir?: string;
+  platform?: NodeJS.Platform;
 }): Promise<CodexDoctorReport> {
   const daemon = await readDaemonStatus(params.config);
   const proxyBaseUrl = `http://127.0.0.1:${params.config.proxyPort}/v1`;
   const providerName = params.config.providerName || "tokenpilot";
   const expectedHookCommand = await resolveCodexHookCommandForInstall();
   const expectedMcpSpec = resolveCodexMcpServerSpecForInstall(params.config.stateDir);
+  const expectedCleanerMcpSpec = resolveCodexCleanerMcpServerSpecForInstall(
+    params.config.stateDir,
+    params.tokenPilotConfigPath,
+  );
   const rootProvider = await readCodexRootModelProvider(params.configPath);
   const managedOpenAIProvider = providerName === "openai";
   const configuredProvider = managedOpenAIProvider
@@ -307,6 +354,15 @@ export async function inspectCodexDoctor(params: {
     ? await readCodexRootStringAssignment("openai_base_url", params.configPath)
     : undefined;
   const mcp = await readCodexMcpServerFromToml(TOKENPILOT_MCP_SERVER_NAME, params.configPath);
+  const cleanerMcp = await readCodexMcpServerFromToml(CODEX_CLEANER_MCP_SERVER_NAME, params.configPath);
+  const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  const cliBinDir = params.cliBinDir
+    ?? process.env.LIGHTRSI_BIN_DIR
+    ?? join(homeDir, ".local", "bin");
+  const cleanCliInstalled = existsSync(join(cliBinDir, "lightrsi-clean"));
+  const cleanCliLauncherInstalled = (params.platform ?? process.platform) === "win32"
+    ? existsSync(join(cliBinDir, "lightrsi-clean.cmd"))
+    : undefined;
   let hooksRoot: Record<string, unknown> = {};
   if (existsSync(params.hooksConfigPath)) {
     hooksRoot = JSON.parse(await readFile(params.hooksConfigPath, "utf8").catch(() => "{}")) as Record<string, unknown>;
@@ -349,6 +405,12 @@ export async function inspectCodexDoctor(params: {
     expectedStateDir: params.config.stateDir,
     expectedStartupTimeoutSec: DEFAULT_TOKENPILOT_MCP_STARTUP_TIMEOUT_SEC,
   });
+  const cleanerMcpHealth = inspectTokenPilotMcpHealth({
+    observed: cleanerMcp,
+    expected: expectedCleanerMcpSpec,
+    expectedStateDir: params.config.stateDir,
+    expectedStartupTimeoutSec: DEFAULT_TOKENPILOT_MCP_STARTUP_TIMEOUT_SEC,
+  });
   const capabilityJournal = await readCodexRebaseCapabilityJournal(params.config.stateDir);
   const rebaseCapabilityTrusted = !capabilityJournal.readError
     && capabilityJournal.malformedLineCount === 0;
@@ -381,6 +443,8 @@ export async function inspectCodexDoctor(params: {
     expectedHookCommand,
     expectedMcpCommand: expectedMcpSpec.command,
     expectedMcpArgs: expectedMcpSpec.args,
+    expectedCleanerMcpCommand: expectedCleanerMcpSpec.command,
+    expectedCleanerMcpArgs: expectedCleanerMcpSpec.args,
     adapterEnabled: params.config.enabled,
     providerInstalled,
     providerActive: rootProvider === providerName,
@@ -404,6 +468,14 @@ export async function inspectCodexDoctor(params: {
     expectedMcpStartupTimeoutSec: DEFAULT_TOKENPILOT_MCP_STARTUP_TIMEOUT_SEC,
     coreRuntimeHealthy,
     recoveryMcpHealthy,
+    cleanerMcpInstalled: cleanerMcpHealth.installed,
+    cleanerMcpStateDirMatches: cleanerMcpHealth.stateDirMatches,
+    cleanerMcpCommandMatches: cleanerMcpHealth.commandMatches,
+    cleanerMcpArgsMatch: cleanerMcpHealth.argsMatch,
+    cleanerMcpStartupTimeoutSecMatches: cleanerMcpHealth.startupTimeoutSecMatches,
+    cleanerMcpHealthy: cleanerMcpHealth.healthy,
+    cleanCliInstalled,
+    cleanCliLauncherInstalled,
     degradedMode: coreRuntimeHealthy && !recoveryMcpHealthy,
     rebaseCapabilityStatus,
     rebaseCapabilityTrusted,

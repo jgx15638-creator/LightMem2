@@ -101,6 +101,30 @@ function committedInputItems(turn: CommittedTurn): JsonObject[] {
   return turn.request.entry.committedInputItems ?? turn.request.entry.inputItems;
 }
 
+type RequestInputBoundary = {
+  requestId: string;
+  itemCount: number;
+};
+
+function effectiveInputItems(
+  turn: CommittedTurn,
+  boundary?: RequestInputBoundary,
+): JsonObject[] {
+  const items = committedInputItems(turn);
+  return boundary?.requestId === turn.request.entry.requestId
+    ? items.slice(0, boundary.itemCount)
+    : items;
+}
+
+function effectiveOutputItems(
+  turn: CommittedTurn,
+  boundary?: RequestInputBoundary,
+): JsonObject[] {
+  return boundary?.requestId === turn.request.entry.requestId
+    ? []
+    : turn.response.entry.outputItems;
+}
+
 function buildCommittedChain(params: {
   headResponseId?: string;
   requests: Map<string, IndexedRequest>;
@@ -229,6 +253,7 @@ function buildAttributedTurns(params: {
   chain: CommittedTurn[];
   effectiveItemRecords: EffectiveItemRecord[];
   sessionId: string;
+  requestInputBoundary?: RequestInputBoundary;
 }): { turns: CodexEffectiveHistoryTurn[]; complete: boolean; ambiguousDuplicate: boolean } {
   const candidates = params.effectiveItemRecords.map((entry) => ({
     ...entry,
@@ -270,12 +295,18 @@ function buildAttributedTurns(params: {
         candidate.stableItemId,
       );
     };
-    turn.request.entry.inputItems.forEach((item) => attribute(item, "input"));
-    const sourceKeys = new Set(turn.request.entry.inputItems.map(turnAttributionKey));
-    committedInputItems(turn)
-      .filter((item) => !sourceKeys.has(turnAttributionKey(item)))
-      .forEach((item) => attribute(item, "input", false));
-    turn.response.entry.outputItems.forEach((item) => attribute(item, "output"));
+    if (params.requestInputBoundary?.requestId === turn.request.entry.requestId) {
+      effectiveInputItems(turn, params.requestInputBoundary)
+        .forEach((item) => attribute(item, "input"));
+    } else {
+      turn.request.entry.inputItems.forEach((item) => attribute(item, "input"));
+      const sourceKeys = new Set(turn.request.entry.inputItems.map(turnAttributionKey));
+      committedInputItems(turn)
+        .filter((item) => !sourceKeys.has(turnAttributionKey(item)))
+        .forEach((item) => attribute(item, "input", false));
+    }
+    effectiveOutputItems(turn, params.requestInputBoundary)
+      .forEach((item) => attribute(item, "output"));
     return sidecar;
   });
   const ambiguousDuplicate = Array.from(sourceCounts).some(([key, sourceCount]) => (
@@ -627,6 +658,8 @@ export type BuildCodexEffectiveHistoryParams = {
   sessionId: string;
   headResponseId?: string;
   currentRequestId?: string;
+  /** Build the committed view at a prefix of the head request, before its response output. */
+  requestInputBoundary?: RequestInputBoundary;
   rolloutParserBootstrap?: () => Promise<CodexEffectiveHistory | null>;
   rolloutViewBootstrap?: () => Promise<CodexEffectiveHistoryView | null>;
 };
@@ -648,6 +681,19 @@ export async function buildCodexEffectiveHistoryView(
     responses,
     parentResponseId: semanticPreviousResponseId,
   });
+  if (params.requestInputBoundary) {
+    const boundaryTurn = committedChain.chain.at(-1);
+    const boundaryItems = boundaryTurn ? committedInputItems(boundaryTurn) : [];
+    if (
+      !boundaryTurn
+      || boundaryTurn.request.entry.requestId !== params.requestInputBoundary.requestId
+      || !Number.isSafeInteger(params.requestInputBoundary.itemCount)
+      || params.requestInputBoundary.itemCount < 0
+      || params.requestInputBoundary.itemCount > boundaryItems.length
+    ) {
+      throw new TypeError("Codex effective history request input boundary must target the committed head");
+    }
+  }
   const malformedStreams = hasMalformedStreamEvents(committedChain.chain);
   const turnSequenceConflict = hasTurnSequenceConflict(committedChain.chain);
   const emptyChainWithJournal = Boolean(
@@ -700,7 +746,7 @@ export async function buildCodexEffectiveHistoryView(
     const turnSyntheticOccurrences = carriesCommittedReplay
       ? new Map<string, number>()
       : syntheticOccurrences;
-    committedInputItems(turn).forEach((item, itemOrdinal) => {
+    effectiveInputItems(turn, params.requestInputBoundary).forEach((item, itemOrdinal) => {
       appendEffectiveItem({
         item,
         sessionId: params.sessionId,
@@ -715,7 +761,7 @@ export async function buildCodexEffectiveHistoryView(
         syntheticOccurrences: turnSyntheticOccurrences,
       });
     });
-    turn.response.entry.outputItems.forEach((item, itemOrdinal) => {
+    effectiveOutputItems(turn, params.requestInputBoundary).forEach((item, itemOrdinal) => {
       appendEffectiveItem({
         item,
         sessionId: params.sessionId,
@@ -736,6 +782,7 @@ export async function buildCodexEffectiveHistoryView(
     chain: semanticChain.chain,
     effectiveItemRecords,
     sessionId: params.sessionId,
+    requestInputBoundary: params.requestInputBoundary,
   });
   const attributionIncomplete = !semanticChain.complete || !attribution.complete;
   if (attributionIncomplete) journalReasonCodes.push("journal_turn_attribution_incomplete");

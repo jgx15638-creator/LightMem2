@@ -125,6 +125,44 @@ test("analysis persists an immutable plan and protects the active task", async (
   }
 });
 
+test("analysis creates a fresh plan attempt after an identical plan was cancelled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lightrsi-clean-retry-cancelled-"));
+  try {
+    const first = await analyzeContextCleanSession({
+      stateDir: root,
+      bridge: bridge(),
+      sessionId: "session-1",
+      provider,
+      async loadRegistry() { return registry(); },
+    });
+    const controlPlane = createContextCleanerControlPlane({
+      stateDir: root,
+      now: () => "2026-08-20T00:01:00.000Z",
+    });
+    await controlPlane.cancelCleanPlan(first.plan.planId);
+
+    const retried = await analyzeContextCleanSession({
+      stateDir: root,
+      bridge: bridge(),
+      sessionId: "session-1",
+      provider,
+      async loadRegistry() { return registry(); },
+    });
+
+    assert.notEqual(retried.plan.planId, first.plan.planId);
+    assert.equal(
+      (await readContextCleanPlan({ stateDir: root, planId: first.plan.planId })).value?.status,
+      "cancelled",
+    );
+    assert.equal(
+      (await readContextCleanPlan({ stateDir: root, planId: retried.plan.planId })).value?.status,
+      "analyzed",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("control plane validates exact frozen targets and schedules idempotently", async () => {
   const root = await mkdtemp(join(tmpdir(), "lightrsi-clean-control-plane-"));
   try {

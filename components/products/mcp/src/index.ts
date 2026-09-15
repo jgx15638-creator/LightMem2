@@ -12,8 +12,17 @@ import {
   resolveRecoveryStateDir,
 } from "@lightrsi/artifact-store";
 import { TOKENPILOT_RECOVERY_MCP_PRODUCT } from "./product-registration.js";
+import {
+  encodeMcpMessage,
+  type TokenPilotMcpWireProtocol,
+} from "./wire.js";
 
 export { TOKENPILOT_RECOVERY_MCP_PRODUCT } from "./product-registration.js";
+export * from "./session.js";
+export {
+  encodeMcpMessage,
+  type TokenPilotMcpWireProtocol,
+} from "./wire.js";
 
 export const TOKENPILOT_MCP_SERVER_NAME = "tokenpilot_memory_fault_recover";
 export const DEFAULT_TOKENPILOT_MCP_STARTUP_TIMEOUT_SEC = 90;
@@ -25,6 +34,7 @@ export type TokenPilotMcpServerSpec = {
   command: string;
   args: string[];
   env: Record<string, string>;
+  envVars?: string[];
   entryPath: string;
 };
 
@@ -43,6 +53,7 @@ export type TokenPilotObservedMcpConfig = {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  envVars?: string[];
   startupTimeoutSec?: number;
 };
 
@@ -51,6 +62,7 @@ export type TokenPilotMcpHealthSummary = {
   stateDirMatches: boolean;
   commandMatches: boolean;
   argsMatch: boolean;
+  envVarsMatch: boolean;
   startupTimeoutSecMatches: boolean;
   healthy: boolean;
 };
@@ -181,17 +193,6 @@ export function resolveTokenPilotMcpProbeServerSpec(params?: {
     );
   }
   return buildTokenPilotMcpServerSpec(distEntryPath, params?.stateDir);
-}
-
-export type TokenPilotMcpWireProtocol = "newline_json" | "content_length";
-
-export function encodeMcpMessage(message: unknown, protocol: TokenPilotMcpWireProtocol = "newline_json"): Buffer {
-  const body = Buffer.from(JSON.stringify(message), "utf8");
-  if (protocol === "content_length") {
-    const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "utf8");
-    return Buffer.concat([header, body]);
-  }
-  return Buffer.concat([body, Buffer.from("\n", "utf8")]);
 }
 
 function tryReadContentLengthMcpInitializeResponse(buffer: Buffer): {
@@ -385,18 +386,24 @@ export function inspectTokenPilotMcpHealth(params: {
   const installed = Boolean(observed?.command);
   const stateDirMatches = observed?.env?.TOKENPILOT_STATE_DIR === params.expectedStateDir;
   const commandMatches = observed?.command === params.expected.command;
+  const expectedEnvVars = [...(params.expected.envVars ?? [])].sort();
+  const observedEnvVars = [...(observed?.envVars ?? [])].sort();
+  const envVarsMatch = expectedEnvVars.length === observedEnvVars.length
+    && observedEnvVars.every((value, index) => value === expectedEnvVars[index]);
   const startupTimeoutSecMatches = observed?.startupTimeoutSec === expectedStartupTimeoutSec;
   return {
     installed,
     stateDirMatches,
     commandMatches,
     argsMatch,
+    envVarsMatch,
     startupTimeoutSecMatches,
     healthy:
       installed
       && stateDirMatches
       && commandMatches
       && argsMatch
+      && envVarsMatch
       && startupTimeoutSecMatches,
   };
 }
