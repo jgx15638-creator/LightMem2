@@ -8,21 +8,34 @@ A modular runtime for recursive improvement in long-running LLM agents
 
 <p align="center">
   <img src="https://img.shields.io/badge/Framework-LightRSI-black" alt="framework">
-  <img src="https://img.shields.io/badge/Hosts-OpenClaw%20%7C%20Codex%20%7C%20Claude%20Code-green" alt="hosts">
-  <img src="https://img.shields.io/badge/Component-TokenPilot-blue" alt="component">
+  <img src="https://img.shields.io/badge/Hosts-OpenClaw%20%7C%20Codex%20%7C%20Claude%20Code%20%7C%20DeepSeek%20Harness-green" alt="hosts">
+  <img src="https://img.shields.io/badge/Product-Context%20Cleaner-orange" alt="product">
+  <img src="https://img.shields.io/badge/Paper-TokenPilot-blue" alt="paper">
   <img src="https://img.shields.io/badge/Package%20Manager-pnpm-informational" alt="pnpm">
   <img src="https://img.shields.io/badge/License-MIT-brightgreen" alt="license">
 </p>
 
 ---
 
-<span id='components'/>
+<span id='products'/>
 
-## 🧩 Components
+## 🛠️ Products
 
-LightRSI separates reusable improvement capabilities from shared runtime infrastructure and host-specific integration. TokenPilot is the first production preset; memory writeback, model adaptation, and agent-architecture evolution can build on the same runtime boundaries over time.
+### Context Cleaner
 
-| Component | What It Does | How It Works | Effect |
+Context Cleaner is available, with the same plan, approval, status, and cancellation model across hosts. In Codex, `/lightrsi-clean` opens the host-rendered task selector; the direct terminal equivalent is `lightrsi codex clean`. Analysis is read-only until you confirm a selection, and protected tasks cannot be selected.
+
+<p align="center">
+  <img src="./figs/tokenpilot/ContextCleaner.gif" alt="Codex Context Cleaner task selection" width="900">
+</p>
+
+<span id='papers'/>
+
+## 📄 Papers
+
+LightRSI separates reusable improvement capabilities from shared runtime infrastructure and host-specific integration. TokenPilot is the first preset.
+
+| Papers | What It Does | How It Works | Effect |
 | :-- | :-- | :-- | :-- |
 | `TokenPilot` | Keeps long-running agent sessions smaller, cheaper, and easier to sustain | Stabilizes the reusable prompt prefix, trims oversized tool output before it poisons later turns, and limits how much old context is carried forward as sessions grow | Better cache reuse, lower token usage, lower cost, and less context bloat in shared sessions |
 
@@ -31,6 +44,8 @@ LightRSI separates reusable improvement capabilities from shared runtime infrast
 ## 📑 Table of Contents
 
 * <a href='#news'>📢 News</a>
+* <a href='#products'>🛠️ Products</a>
+* <a href='#papers'>📄 Papers</a>
 * <a href='#installation'>🔧 Installation</a>
 * <a href='#quickstart'>⚡ Quick Start</a>
 * <a href='#visual-results'>🖼️ Visual Results</a>
@@ -178,6 +193,28 @@ configuration.
 
 </details>
 
+<details>
+<summary><strong>DeepSeek Harness (Cordis)</strong></summary>
+
+<br>
+
+The DeepSeek Harness adapter is a native Cordis plugin and is installed into a DeepSeek Harness checkout rather than through the shared CLI. Build a local package from this repository:
+
+```bash
+corepack pnpm --filter @lightrsi/deepseek-harness-adapter build
+corepack pnpm --filter @lightrsi/deepseek-harness-adapter pack --pack-destination ./artifacts
+```
+
+From the DeepSeek Harness checkout, add the generated `.tgz` to the profile you use, such as `web`:
+
+```bash
+node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add /absolute/path/to/lightrsi-deepseek-harness-adapter-<version>.tgz
+```
+
+The plugin is registered as `tokenpilot-dsh` and is disabled by default. Configure and enable it only after supplying a durable `stateDir` and the estimator and eviction settings required by your Harness profile. Its failure mode is fail-open, so an optimization failure does not block the agent.
+
+</details>
+
 <span id='quickstart'/>
 
 ## ⚡ Quick Start
@@ -298,6 +335,22 @@ Like Codex, install success does not guarantee that the gateway is already healt
 
 </details>
 
+<details>
+<summary><strong>DeepSeek Harness</strong></summary>
+
+<br>
+
+After adding and enabling the `tokenpilot-dsh` Cordis plugin, open a DeepSeek
+Harness session and run:
+
+```text
+/tokenpilot-status
+```
+
+The command reports estimator, scheduling, application, and deferral state without creating a model turn. By default, the adapter runs its eviction pass before the Harness's native compaction; preserve this ordering unless you deliberately change the profile configuration.
+
+</details>
+
 
 <span id='visual-results'/>
 
@@ -343,7 +396,7 @@ At a high level:
 - `components/adapters`
   - host-specific integration, install surfaces, runtime hooks, and product registration
 - `components/products`
-  - shared CLI, Visual launcher, and MCP recovery surfaces
+  - shared CLI, Visual launcher, recovery MCP, and interactive Cleaner surfaces
 
 ```text
 LightRSI/
@@ -357,10 +410,10 @@ LightRSI/
 │   │   ├── openclaw/             # OpenClaw adapter
 │   │   ├── codex/                # Codex CLI adapter
 │   │   ├── claude-code/          # Claude Code adapter
-│   │   └── deepseek-harness/     # DeepSeek Harness Cordis adapter
+│   │   └── deepseek-harness/     # native DeepSeek Harness Cordis adapter
 │   └── products/
-│       ├── cli/                  # shared lightrsi CLI and browser visual launcher
-│       └── mcp/                  # shared memory_fault_recover MCP server
+│       ├── cli/                  # shared lightrsi CLI, browser visual launcher, and Cleaner UI
+│       └── mcp/                  # shared recovery and interactive MCP session support
 ├── docs/                         # Public-facing notes and smoke helpers for the current runtime path
 ├── website/                      # Documentation site
 └── README.md
@@ -471,6 +524,7 @@ Useful Codex controls:
 - `reduction on|off` toggles observation reduction
 - `reduction mode <light|balanced>` switches between lighter and stronger trimming
 - `reduction pass toolPayloadTrim off` disables one specific reduction pass
+- `lightrsi codex clean` analyzes a session and interactively selects tasks to clean
 
 </details>
 
@@ -504,6 +558,21 @@ Useful Claude Code controls:
 
 </details>
 
+<details>
+<summary><strong>DeepSeek Harness</strong></summary>
+
+<br>
+
+Inside a DeepSeek Harness session:
+
+```text
+/tokenpilot-status
+```
+
+This read-only command reports estimator activity, eligible eviction work, scheduled or applied changes, and any deferrals. The DeepSeek Harness adapter is registered by Cordis as `tokenpilot-dsh`; it does not use the shared `lightrsi` CLI.
+
+</details>
+
 
 <span id='experimental-results'/>
 
@@ -529,15 +598,6 @@ Please cite our paper if you use LightRSI in your work.
   journal={arXiv preprint arXiv:2606.17016},
   year={2026}
 }
-
-@inproceedings{fang2025lightmem,
-  title={LightMem: Lightweight and Efficient Memory-Augmented Generation},
-  author={Jizhan Fang and Xinle Deng and Haoming Xu and Ziyan Jiang and Yuqi Tang and Ziwen Xu and Shumin Deng and Yunzhi Yao and Mengru Wang and Shuofei Qiao and Huajun Chen and Ningyu Zhang},
-  booktitle={The Fourteenth International Conference on Learning Representations},
-  year={2026},
-  url={https://openreview.net/forum?id=dyJ0GWpjJB}
-}
-
 ```
 
 <span id='contributing'/>
