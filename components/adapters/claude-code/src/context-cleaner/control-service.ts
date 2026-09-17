@@ -4,6 +4,9 @@ import {
   createContextCleanerControlService,
   type ContextCleanerControlService,
 } from "@lightrsi/cleaner";
+// Capabilities path (task doc §3.2/§3.3): claude drives the shared control
+// service through frozen one-way capabilities + the shared control plane,
+// instead of the legacy host bridge.
 
 import {
   defaultClaudeCodeStateDir,
@@ -15,7 +18,7 @@ import {
   loadClaudeCodeSessionSnapshot,
   resolveLatestClaudeCodeSessionId,
 } from "../session-state.js";
-import { createClaudeCodeContextCleanerBridge } from "./bridge.js";
+import { createClaudeCodeCleanerCapabilities } from "./capabilities.js";
 
 /**
  * Claude Code cleaner control-service composition.
@@ -110,7 +113,7 @@ export async function createClaudeCodeContextCleanerControlService(params?: {
     stateDir,
     now: params?.now,
   });
-  const bridge = createClaudeCodeContextCleanerBridge({ stateDir, controlPlane });
+  const capabilities = createClaudeCodeCleanerCapabilities({ stateDir });
 
   const recommendationConfig = resolveClaudeCleanerRecommendationConfig(
     config.taskStateEstimator,
@@ -121,7 +124,8 @@ export async function createClaudeCodeContextCleanerControlService(params?: {
 
   const service = createContextCleanerControlService({
     stateDir,
-    bridge,
+    capabilities,
+    controlPlane,
     recommendationProvider,
     now: params?.now,
   });
