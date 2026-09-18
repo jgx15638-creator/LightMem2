@@ -312,6 +312,29 @@ export type ContextCleanerControlPlane = Pick<
   "executeApprovedClean" | "readCleanReceipt" | "cancelCleanPlan"
 >;
 
+export type FinalizeContextCleanScheduleParams = {
+  cleanPlanId: string;
+  hostId: string;
+  sessionId: string;
+  baseRevision: string;
+  selectedTaskIds: string[];
+  scheduledAt: string;
+};
+
+/**
+ * Two-phase scheduling boundary used by capability-based Host composition.
+ * The shared store remains "approved" until the Host has durably written its
+ * schedule pointer, then the second operation publishes "scheduled".
+ */
+export interface ContextCleanerSchedulingControlPlane extends ContextCleanerControlPlane {
+  approveCleanSelection(
+    params: ExecuteApprovedContextCleanParams,
+  ): Promise<ContextCleanReceipt>;
+  finalizeCleanSchedule(
+    params: FinalizeContextCleanScheduleParams,
+  ): Promise<ContextCleanReceipt>;
+}
+
 /**
  * Shared scheduled-plan consumer used inside a Host's existing request lock.
  * Host-specific request payloads and actual rewrite commits stay in adapters.
@@ -367,13 +390,22 @@ export type ContextCleanerScheduleWriteResult = {
   reasons: string[];
 };
 
+export type ContextCleanerScheduleAbortRequest = ContextCleanerScheduleRequest & {
+  receiptStatus: "stale" | "cancelled" | "failed";
+  reasons: string[];
+  updatedAt: string;
+};
+
 /**
- * Writes the Host's own scheduled-plan pointer for an already-produced
- * "scheduled" receipt. It never runs the shared plan-store execute step.
+ * Writes or compensates the Host's own scheduled-plan pointer. Shared plan
+ * state is advanced separately by ContextCleanerSchedulingControlPlane.
  */
 export interface ContextCleanerScheduleWriter {
   writeSchedule(
     request: ContextCleanerScheduleRequest,
+  ): Promise<ContextCleanerScheduleWriteResult>;
+  abortSchedule(
+    request: ContextCleanerScheduleAbortRequest,
   ): Promise<ContextCleanerScheduleWriteResult>;
 }
 

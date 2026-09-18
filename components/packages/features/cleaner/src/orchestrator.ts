@@ -10,9 +10,10 @@ import {
   type ContextCleanPendingReceipt,
   type ContextCleanPlan,
   type ContextCleanReceipt,
-  type ContextCleanerControlPlane,
   type ContextCleanerHostBridge,
+  type ContextCleanerSchedulingControlPlane,
   type ExecuteApprovedContextCleanParams,
+  type FinalizeContextCleanScheduleParams,
 } from "./contracts.js";
 import { readContextCleanPlan, saveContextCleanPlan } from "./clean-plan-store.js";
 import { readContextCleanReceipt } from "./clean-receipt-store.js";
@@ -276,60 +277,176 @@ function pendingReceipt(params: {
 export function createContextCleanerControlPlane(params: {
   stateDir: string;
   now?: () => string;
-}): ContextCleanerControlPlane {
+}): ContextCleanerSchedulingControlPlane {
   const now = params.now ?? (() => new Date().toISOString());
-  return {
-    async executeApprovedClean(request) {
-      const stored = await readContextCleanPlan({ stateDir: params.stateDir, planId: request.cleanPlanId });
-      if (stored.bypassed) throwStoreFailure("clean_approval_plan_unavailable", stored.reasons);
-      if (!stored.value) throw new Error("clean_approval_plan_missing");
-      const currentReceipt = await readContextCleanReceipt({
-        stateDir: params.stateDir,
-        planId: request.cleanPlanId,
-      });
-      if (currentReceipt.bypassed) {
-        throwStoreFailure("clean_approval_receipt_unavailable", currentReceipt.reasons);
+
+  async function approveCleanSelection(
+    request: ExecuteApprovedContextCleanParams,
+  ): Promise<ContextCleanReceipt> {
+    const stored = await readContextCleanPlan({
+      stateDir: params.stateDir,
+      planId: request.cleanPlanId,
+    });
+    if (stored.bypassed) throwStoreFailure("clean_approval_plan_unavailable", stored.reasons);
+    if (!stored.value) throw new Error("clean_approval_plan_missing");
+    const currentReceipt = await readContextCleanReceipt({
+      stateDir: params.stateDir,
+      planId: request.cleanPlanId,
+    });
+    if (currentReceipt.bypassed) {
+      throwStoreFailure("clean_approval_receipt_unavailable", currentReceipt.reasons);
+    }
+    if (isTerminalContextCleanStatus(stored.value.status)) {
+      if (!currentReceipt.value) throw new Error("clean_approval_terminal_receipt_missing");
+      return currentReceipt.value;
+    }
+
+    const selected = validateApproval(stored.value.plan, request);
+    const selectedTaskIds = selected.map((task) => task.taskId);
+    if (stored.value.status === "scheduled") {
+      if (!currentReceipt.value
+        || currentReceipt.value.status !== "scheduled"
+        || !sameStrings(currentReceipt.value.selectedTaskIds, selectedTaskIds)) {
+        throw new Error("clean_approval_scheduled_conflict");
       }
-      if (isTerminalContextCleanStatus(stored.value.status)) {
-        if (!currentReceipt.value) throw new Error("clean_approval_terminal_receipt_missing");
-        return currentReceipt.value;
-      }
-      const selected = validateApproval(stored.value.plan, request);
-      const selectedTaskIds = selected.map((task) => task.taskId);
-      if (stored.value.status === "scheduled") {
-        if (!currentReceipt.value
-          || currentReceipt.value.status !== "scheduled"
-          || !sameStrings(currentReceipt.value.selectedTaskIds, selectedTaskIds)) {
-          throw new Error("clean_approval_scheduled_conflict");
-        }
-        return currentReceipt.value;
-      }
-      if (stored.value.status === "analyzed") {
-        const approved = pendingReceipt({
-          plan: stored.value.plan,
-          status: "approved",
-          selectedTaskIds,
-          updatedAt: request.approvedAt,
-          fallbackUsed: currentReceipt.value?.fallbackUsed ?? false,
-        });
-        const result = await transitionContextCleanState({ stateDir: params.stateDir, receipt: approved });
-        if (result.bypassed) throwStoreFailure("clean_approval_store_failed", result.reasons);
-      } else if (stored.value.status === "approved"
-        && (!currentReceipt.value
-          || currentReceipt.value.status !== "approved"
-          || !sameStrings(currentReceipt.value.selectedTaskIds, selectedTaskIds))) {
+      return currentReceipt.value;
+    }
+    if (stored.value.status === "approved") {
+      if (!currentReceipt.value
+        || currentReceipt.value.status !== "approved"
+        || !sameStrings(currentReceipt.value.selectedTaskIds, selectedTaskIds)) {
         throw new Error("clean_approval_selection_conflict");
       }
-      const scheduled = pendingReceipt({
-        plan: stored.value.plan,
-        status: "scheduled",
-        selectedTaskIds,
-        updatedAt: now(),
-        fallbackUsed: currentReceipt.value?.fallbackUsed ?? false,
+      return currentReceipt.value;
+    }
+
+    const approved = pendingReceipt({
+      plan: stored.value.plan,
+      status: "approved",
+      selectedTaskIds,
+      updatedAt: request.approvedAt,
+      fallbackUsed: currentReceipt.value?.fallbackUsed ?? false,
+    });
+    const result = await transitionContextCleanState({
+      stateDir: params.stateDir,
+      receipt: approved,
+    });
+    if (!result.bypassed) return approved;
+
+    // A concurrent cancellation can win after the initial read. Replay that
+    // terminal result instead of reporting a failed approval which did not win.
+    const latestPlan = await readContextCleanPlan({
+      stateDir: params.stateDir,
+      planId: request.cleanPlanId,
+    });
+    const latestReceipt = await readContextCleanReceipt({
+      stateDir: params.stateDir,
+      planId: request.cleanPlanId,
+    });
+    if (!latestPlan.bypassed && !latestReceipt.bypassed
+      && latestPlan.value && latestReceipt.value
+      && isTerminalContextCleanStatus(latestPlan.value.status)) {
+      return latestReceipt.value;
+    }
+    throwStoreFailure("clean_approval_store_failed", result.reasons);
+  }
+
+  async function finalizeCleanSchedule(
+    request: FinalizeContextCleanScheduleParams,
+  ): Promise<ContextCleanReceipt> {
+    const stored = await readContextCleanPlan({
+      stateDir: params.stateDir,
+      planId: request.cleanPlanId,
+    });
+    if (stored.bypassed) throwStoreFailure("clean_schedule_plan_unavailable", stored.reasons);
+    if (!stored.value) throw new Error("clean_schedule_plan_missing");
+    const plan = stored.value.plan;
+    if (request.hostId !== plan.hostId
+      || request.sessionId !== plan.sessionId
+      || request.baseRevision !== plan.baseRevision
+      || request.selectedTaskIds.length === 0
+      || new Set(request.selectedTaskIds).size !== request.selectedTaskIds.length
+      || Number.isNaN(Date.parse(request.scheduledAt))) {
+      throw new Error("clean_schedule_identity_invalid");
+    }
+    const currentReceipt = await readContextCleanReceipt({
+      stateDir: params.stateDir,
+      planId: request.cleanPlanId,
+    });
+    if (currentReceipt.bypassed) {
+      throwStoreFailure("clean_schedule_receipt_unavailable", currentReceipt.reasons);
+    }
+    if (isTerminalContextCleanStatus(stored.value.status)) {
+      if (!currentReceipt.value) throw new Error("clean_schedule_terminal_receipt_missing");
+      return currentReceipt.value;
+    }
+    if (stored.value.status === "scheduled") {
+      if (!currentReceipt.value
+        || currentReceipt.value.status !== "scheduled"
+        || !sameStrings(currentReceipt.value.selectedTaskIds, request.selectedTaskIds)) {
+        throw new Error("clean_schedule_selection_conflict");
+      }
+      return currentReceipt.value;
+    }
+    if (stored.value.status !== "approved"
+      || !currentReceipt.value
+      || currentReceipt.value.status !== "approved"
+      || !sameStrings(currentReceipt.value.selectedTaskIds, request.selectedTaskIds)) {
+      throw new Error("clean_schedule_not_approved");
+    }
+
+    const scheduled = pendingReceipt({
+      plan,
+      status: "scheduled",
+      selectedTaskIds: [...request.selectedTaskIds],
+      updatedAt: request.scheduledAt,
+      fallbackUsed: currentReceipt.value.fallbackUsed,
+    });
+    const result = await transitionContextCleanState({
+      stateDir: params.stateDir,
+      receipt: scheduled,
+    });
+    if (!result.bypassed) return scheduled;
+
+    // The Host write happens before this transition. If cancellation won the
+    // race, return the durable terminal receipt so the caller can compensate
+    // the Host pointer instead of returning a stale scheduled result.
+    const latestPlan = await readContextCleanPlan({
+      stateDir: params.stateDir,
+      planId: request.cleanPlanId,
+    });
+    const latestReceipt = await readContextCleanReceipt({
+      stateDir: params.stateDir,
+      planId: request.cleanPlanId,
+    });
+    if (!latestPlan.bypassed && !latestReceipt.bypassed
+      && latestPlan.value && latestReceipt.value) {
+      if (isTerminalContextCleanStatus(latestPlan.value.status)) {
+        return latestReceipt.value;
+      }
+      if (latestPlan.value.status === "scheduled"
+        && latestReceipt.value.status === "scheduled"
+        && sameStrings(latestReceipt.value.selectedTaskIds, request.selectedTaskIds)) {
+        return latestReceipt.value;
+      }
+    }
+    throwStoreFailure("clean_schedule_store_failed", result.reasons);
+  }
+
+  return {
+    approveCleanSelection,
+    finalizeCleanSchedule,
+    async executeApprovedClean(request) {
+      const approved = await approveCleanSelection(request);
+      if (approved.status !== "approved") return approved;
+      return finalizeCleanSchedule({
+        cleanPlanId: request.cleanPlanId,
+        hostId: request.hostId,
+        sessionId: request.sessionId,
+        baseRevision: request.baseRevision,
+        selectedTaskIds: request.selectedTasks.map((task) => task.taskId),
+        scheduledAt: now(),
       });
-      const result = await transitionContextCleanState({ stateDir: params.stateDir, receipt: scheduled });
-      if (result.bypassed) throwStoreFailure("clean_schedule_store_failed", result.reasons);
-      return scheduled;
     },
     async readCleanReceipt(planId) {
       const result = await readContextCleanReceipt({ stateDir: params.stateDir, planId });

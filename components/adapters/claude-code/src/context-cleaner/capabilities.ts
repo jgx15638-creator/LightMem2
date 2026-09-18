@@ -2,19 +2,21 @@ import type { CleanerHostCapabilities } from "@lightrsi/cleaner";
 
 import { readLatestClaudeSnapshotRecord } from "../context-rewrite/snapshot-store.js";
 import { listClaudeCleanerSessions } from "./session-catalog.js";
-import { scheduleClaudeCleanerPlan } from "./scheduler.js";
+import {
+  appendClaudeCleanerTerminal,
+  scheduleClaudeCleanerPlan,
+} from "./scheduler.js";
 
 const CLAUDE_HOST_ID = "claude-code";
 
 /**
  * Claude Code frozen one-way cleaner capabilities (task doc §3.2/§3.3).
  *
- * Splits the host-owned half of the old bridge into three pure, stateDir-only
- * operations: read the canonical snapshot, enumerate sessions, and write the
+ * Splits the host-owned half of the old bridge into stateDir-only operations:
+ * read the canonical snapshot, enumerate sessions, and write or compensate the
  * Claude schedule pointer. Plan/receipt persistence and validation stay in the
  * shared control plane + control service (see composeContextCleanerHostBridge),
- * so this factory needs nothing but stateDir. The underlying functions are the
- * same ones the legacy bridge wraps, so behaviour is unchanged.
+ * so this factory needs nothing but stateDir.
  */
 export function createClaudeCodeCleanerCapabilities(params: {
   stateDir: string;
@@ -54,6 +56,16 @@ export function createClaudeCodeCleanerCapabilities(params: {
           baseRevision: request.baseRevision,
           selectedTaskIds: request.selectedTaskIds,
           scheduledAt: request.scheduledAt,
+        });
+      },
+      abortSchedule(request) {
+        return appendClaudeCleanerTerminal({
+          stateDir,
+          sessionId: request.sessionId,
+          cleanPlanId: request.cleanPlanId,
+          receiptStatus: request.receiptStatus,
+          reasons: request.reasons,
+          updatedAt: request.updatedAt,
         });
       },
     },
