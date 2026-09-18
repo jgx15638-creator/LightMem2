@@ -312,6 +312,29 @@ export type ContextCleanerControlPlane = Pick<
   "executeApprovedClean" | "readCleanReceipt" | "cancelCleanPlan"
 >;
 
+export type FinalizeContextCleanScheduleParams = {
+  cleanPlanId: string;
+  hostId: string;
+  sessionId: string;
+  baseRevision: string;
+  selectedTaskIds: string[];
+  scheduledAt: string;
+};
+
+/**
+ * Two-phase scheduling boundary used by capability-based Host composition.
+ * The shared store remains "approved" until the Host has durably written its
+ * schedule pointer, then the second operation publishes "scheduled".
+ */
+export interface ContextCleanerSchedulingControlPlane extends ContextCleanerControlPlane {
+  approveCleanSelection(
+    params: ExecuteApprovedContextCleanParams,
+  ): Promise<ContextCleanReceipt>;
+  finalizeCleanSchedule(
+    params: FinalizeContextCleanScheduleParams,
+  ): Promise<ContextCleanReceipt>;
+}
+
 /**
  * Shared scheduled-plan consumer used inside a Host's existing request lock.
  * Host-specific request payloads and actual rewrite commits stay in adapters.
@@ -324,4 +347,77 @@ export interface ContextCleanerHostExecutionBridge {
   recordCleanReceipt(
     receipt: ContextCleanReceipt,
   ): Promise<ContextCleanStoreWriteResult<ContextCleanPlanRecord>>;
+}
+
+/**
+ * Frozen one-way Host capabilities (task doc §1.2/1.3).
+ *
+ * The three interfaces below decompose the host-owned half of the old
+ * ContextCleanerHostBridge into pure, stateDir-only data operations. Plan and
+ * receipt persistence (executeApprovedClean/readCleanReceipt/cancelCleanPlan)
+ * stay with the shared ContextCleanerControlPlane and are NOT part of host
+ * capabilities — a host adapter supplies data, the shared layer owns
+ * orchestration and validation.
+ */
+export interface ContextCleanerSnapshotSource {
+  readonly hostId: string;
+  readonly rewriteMode: ModelContextRewriteMode;
+  readCleanSnapshot(sessionId: string): Promise<ContextCleanSnapshot>;
+}
+
+export interface ContextCleanerSessionCatalog {
+  listSessions(): Promise<ContextCleanerSession[]>;
+}
+
+export type ContextCleanerScheduleRequest = {
+  sessionId: string;
+  cleanPlanId: string;
+  baseRevision: string;
+  selectedTaskIds: string[];
+  scheduledAt: string;
+};
+
+export type ContextCleanerScheduleWriteOutcome =
+  | "stored"
+  | "unchanged"
+  | "transitioned"
+  | "missing"
+  | "conflict"
+  | "bypassed";
+
+export type ContextCleanerScheduleWriteResult = {
+  outcome: ContextCleanerScheduleWriteOutcome;
+  reasons: string[];
+};
+
+export type ContextCleanerScheduleAbortRequest = ContextCleanerScheduleRequest & {
+  receiptStatus: "stale" | "cancelled" | "failed";
+  reasons: string[];
+  updatedAt: string;
+};
+
+/**
+ * Writes or compensates the Host's own scheduled-plan pointer. Shared plan
+ * state is advanced separately by ContextCleanerSchedulingControlPlane.
+ */
+export interface ContextCleanerScheduleWriter {
+  writeSchedule(
+    request: ContextCleanerScheduleRequest,
+  ): Promise<ContextCleanerScheduleWriteResult>;
+  abortSchedule(
+    request: ContextCleanerScheduleAbortRequest,
+  ): Promise<ContextCleanerScheduleWriteResult>;
+}
+
+/**
+ * The frozen bundle a Host adapter exports via its capabilities factory
+ * (e.g. createClaudeCodeCleanerCapabilities). Composed with the shared
+ * ContextCleanerControlPlane by createContextCleanerControlService.
+ */
+export interface CleanerHostCapabilities {
+  readonly hostId: string;
+  readonly rewriteMode: ModelContextRewriteMode;
+  readonly snapshotSource: ContextCleanerSnapshotSource;
+  readonly sessionCatalog: ContextCleanerSessionCatalog;
+  readonly scheduleWriter: ContextCleanerScheduleWriter;
 }

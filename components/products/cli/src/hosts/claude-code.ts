@@ -31,7 +31,7 @@ import { resolveLatestClaudeCodeSessionId } from "../../../../adapters/claude-co
 import {
   readRecentClaudeCodeCacheAuditRecordsForSession,
 } from "../../../../adapters/claude-code/src/cache-audit.js";
-import { createClaudeCodeContextCleanerBridge } from "../../../../adapters/claude-code/src/context-cleaner/index.js";
+import { createClaudeCodeContextCleanerControlService } from "../../../../adapters/claude-code/src/context-cleaner/index.js";
 import {
   applyStandardRuntimeModeConfig,
   buildSessionReportResult,
@@ -42,7 +42,7 @@ import {
 import { handleStandaloneVisualCommandWithSelection } from "./visual.js";
 import type { CliHostPathOverrides } from "../context-store.js";
 import type { CleanCommandBackend } from "../clean.js";
-import { createHostCleanCommandBackend } from "./cleaner.js";
+import { createCleanCommandBackendFromControlService } from "./cleaner.js";
 
 const CLAUDE_REDUCTION_PASS_NAMES = [
   "readStateCompaction",
@@ -71,24 +71,14 @@ async function loadConfig(pathOverrides?: CliHostPathOverrides): Promise<Record<
 export async function createClaudeCodeCleanCommandBackend(
   pathOverrides?: CliHostPathOverrides,
 ): Promise<CleanCommandBackend | undefined> {
-  const config = await loadTokenPilotClaudeCodeConfig(
-    resolveClaudeCodePaths(pathOverrides).tokenPilotConfigPath,
-  );
+  const tokenPilotConfigPath = resolveClaudeCodePaths(pathOverrides).tokenPilotConfigPath;
+  const config = await loadTokenPilotClaudeCodeConfig(tokenPilotConfigPath);
   const stateDir = resolveClaudeCodeStateDir(config as unknown as Record<string, unknown>);
   if (!stateDir) return undefined;
-  return createHostCleanCommandBackend({
-    stateDir,
-    recommendationEnabled: config.taskStateEstimator.enabled,
-    recommendationConfig: {
-      baseUrl: config.taskStateEstimator.baseUrl,
-      apiKey: config.taskStateEstimator.apiKey,
-      model: config.taskStateEstimator.model,
-      requestTimeoutMs: config.taskStateEstimator.requestTimeoutMs,
-    },
-    createBridge(controlPlane) {
-      return createClaudeCodeContextCleanerBridge({ stateDir, controlPlane });
-    },
+  const control = await createClaudeCodeContextCleanerControlService({
+    tokenPilotConfigPath,
   });
+  return createCleanCommandBackendFromControlService(control.service);
 }
 
 async function writeConfig(nextConfig: Record<string, unknown>, pathOverrides?: CliHostPathOverrides): Promise<void> {
