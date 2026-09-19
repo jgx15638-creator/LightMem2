@@ -58,14 +58,23 @@ function isReplace(event: DshLogEventWithMeta): boolean {
 
 function messageText(data: Record<string, unknown>): string {
   const message = isObject(data.message) ? data.message : data;
-  const content = Array.isArray(message.content) ? message.content : [];
   const parts: string[] = [];
-  for (const block of content) {
-    if (!isObject(block)) continue;
-    if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
-    else if (block.type === "tool-result" && typeof block.text === "string") parts.push(block.text);
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!isObject(value)) return;
+    if (value.type === "text" && typeof value.text === "string") {
+      parts.push(value.text);
+      return;
+    }
+    if (Array.isArray(value.content)) visit(value.content);
+  };
+  visit(message.content);
+  if (parts.length === 0 && typeof message.text === "string") {
+    parts.push(message.text);
   }
-  if (parts.length === 0 && typeof message.text === "string") parts.push(message.text);
   return parts.join("\n");
 }
 

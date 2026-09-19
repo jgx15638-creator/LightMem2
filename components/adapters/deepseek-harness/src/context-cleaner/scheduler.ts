@@ -12,12 +12,16 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 export const DSH_CLEANER_SCHEDULE_SCHEMA = "lightrsi.deepseek-harness.cleaner-schedule/v1" as const;
 const DSH_CLEANER_HOST_ID = "deepseek-harness" as const;
 const LOCK_STALE_AFTER_MS = 30_000;
+const LOCK_TIMEOUT_MS = 500;
+const LOCK_RETRY_MS = 5;
 
 type ScheduleIdentity = {
   schema: typeof DSH_CLEANER_SCHEDULE_SCHEMA;
@@ -68,6 +72,12 @@ export type DshCleanerScheduleClaimResult =
   | { outcome: "missing" | "terminal" | "conflict" | "bypassed"; record?: DshCleanerScheduleRecord; reasons: string[] };
 
 type ScheduleLock = { release(): Promise<void> };
+type LockOwner = {
+  token: string;
+  pid: number;
+  hostname: string;
+  createdAt: string;
+};
 
 function errorCode(error: unknown): string | undefined {
   return error && typeof error === "object" && "code" in error
@@ -105,6 +115,47 @@ function schedulePath(stateDir: string, sessionId: string): string {
 function lockPath(stateDir: string, sessionId: string): string {
   const digest = createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
   return join(stateDir, "cleaner-schedule", `${digest}.lock`);
+}
+
+function lockOwner(value: unknown): LockOwner | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const owner = value as Record<string, unknown>;
+  return nonBlank(owner.token)
+    && Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0
+    && nonBlank(owner.hostname)
+    && canonicalTimestamp(owner.createdAt)
+    ? owner as unknown as LockOwner
+    : undefined;
+}
+
+async function readLockOwner(path: string): Promise<LockOwner | undefined> {
+  try {
+    return lockOwner(JSON.parse(await readFile(join(path, "owner.json"), "utf8")) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) === "EPERM";
+  }
+}
+
+async function lockIsStale(path: string): Promise<boolean> {
+  const owner = await readLockOwner(path);
+  if (owner) {
+    if (owner.hostname === hostname()) return !processIsAlive(owner.pid);
+    return Date.now() - Date.parse(owner.createdAt) > LOCK_STALE_AFTER_MS;
+  }
+  try {
+    return Date.now() - (await stat(path)).mtimeMs > LOCK_STALE_AFTER_MS;
+  } catch {
+    return true;
+  }
 }
 
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
@@ -158,33 +209,69 @@ async function writeRecord(path: string, record: DshCleanerScheduleRecord): Prom
 async function acquireSessionLock(params: {
   stateDir: string;
   sessionId: string;
-  allowStaleRetry?: boolean;
 }): Promise<ScheduleLock | undefined> {
   const path = lockPath(params.stateDir, params.sessionId);
+  const recoveryPath = `${path}.recovery`;
+  const deadline = performance.now() + LOCK_TIMEOUT_MS;
   await mkdir(dirname(path), { recursive: true });
-  try {
-    const handle = await open(path, "wx");
-    await handle.writeFile(`${Date.now()}\n`, "utf8");
-    await handle.close();
+
+  while (performance.now() < deadline) {
+    try {
+      await stat(recoveryPath);
+      await delay(LOCK_RETRY_MS);
+      continue;
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") return undefined;
+    }
+
+    try {
+      await mkdir(path);
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") return undefined;
+      if (await lockIsStale(path)) {
+        try {
+          await mkdir(recoveryPath);
+        } catch (recoveryError) {
+          if (errorCode(recoveryError) !== "EEXIST") return undefined;
+          await delay(LOCK_RETRY_MS);
+          continue;
+        }
+        try {
+          if (await lockIsStale(path)) await rm(path, { recursive: true, force: true });
+        } finally {
+          await rm(recoveryPath, { recursive: true, force: true });
+        }
+        continue;
+      }
+      await delay(LOCK_RETRY_MS);
+      continue;
+    }
+
+    const owner: LockOwner = {
+      token: randomUUID(),
+      pid: process.pid,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      await writeFile(join(path, "owner.json"), JSON.stringify(owner), { encoding: "utf8", flag: "wx" });
+    } catch {
+      await rm(path, { recursive: true, force: true });
+      return undefined;
+    }
     return {
       async release() {
-        await unlink(path).catch(() => undefined);
+        try {
+          if ((await readLockOwner(path))?.token === owner.token) {
+            await rm(path, { recursive: true, force: true });
+          }
+        } catch {
+          // An uncertain lock must not delete a later owner's lock.
+        }
       },
     };
-  } catch (error) {
-    if (errorCode(error) !== "EEXIST") return undefined;
-    if (params.allowStaleRetry === false) return undefined;
-    try {
-      const info = await stat(path);
-      if (Date.now() - info.mtimeMs > LOCK_STALE_AFTER_MS) {
-        await unlink(path);
-        return acquireSessionLock({ ...params, allowStaleRetry: false });
-      }
-    } catch {
-      // The holder may have completed between open() and stat()/unlink().
-    }
-    return undefined;
   }
+  return undefined;
 }
 
 /** Read the current schedule pointer for a session. Missing file -> `missing`. */

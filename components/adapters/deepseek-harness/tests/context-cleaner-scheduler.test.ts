@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
@@ -26,6 +27,31 @@ function scheduleInput(stateDir: string, cleanPlanId = "ctxclean-one") {
 }
 
 describe("DSH Context Cleaner schedule pointer", () => {
+  it("serializes concurrent writers after recovering a stale lock owner", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-dsh-schedule-"));
+    try {
+      const input = scheduleInput(stateDir);
+      const digest = createHash("sha256").update(input.sessionId).digest("hex").slice(0, 32);
+      const lock = join(stateDir, "cleaner-schedule", `${digest}.lock`);
+      await mkdir(lock, { recursive: true });
+      await writeFile(join(lock, "owner.json"), JSON.stringify({
+        token: "dead-owner",
+        pid: 2_147_483_647,
+        hostname: hostname(),
+        createdAt: "2026-09-18T00:00:00.000Z",
+      }), "utf8");
+
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => scheduleDshCleanerPlan(input)),
+      );
+      assert.equal(results.filter((result) => result.outcome === "stored").length, 1);
+      assert.equal(results.every((result) =>
+        result.outcome === "stored" || result.outcome === "unchanged"), true);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("is idempotent, reserves exactly one execution, then permits a new plan after terminalization", async () => {
     const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-dsh-schedule-"));
     try {

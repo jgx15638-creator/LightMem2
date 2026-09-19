@@ -10,6 +10,7 @@ import { loadSessionTaskRegistry } from "@lightrsi/history";
 import {
   readContextCleanPlan,
   readContextCleanReceipt,
+  type ContextCleanScheduledReceipt,
 } from "@lightrsi/cleaner";
 
 import type { TokenPilotDshConfig } from "./config.js";
@@ -27,6 +28,8 @@ import { surfaceRevision, type DshCleanSnapshotSession } from "./context-cleaner
 import type { DshCleanerSessionStore } from "./context-cleaner/session-catalog.js";
 import type { CycleSession } from "./eviction-cycle.js";
 import type { DshPluginContext, DshPreStepPayload } from "./types.js";
+
+const CLAIM_RECOVERY_AFTER_MS = 30_000;
 
 /** Request-local signal shared with the automatic eviction handler. */
 export type DshCleanerPreStepState = {
@@ -86,6 +89,62 @@ async function isSharedScheduleReady(params: {
     && sameTaskIds(receipt.value.selectedTaskIds, params.selectedTaskIds);
 }
 
+async function reconcileClaimedSchedule(params: {
+  stateDir: string;
+  claim: DshCleanerClaimedRecord;
+  session: DshCleanSnapshotSession;
+}): Promise<void> {
+  const [plan, receipt] = await Promise.all([
+    readContextCleanPlan({ stateDir: params.stateDir, planId: params.claim.cleanPlanId }),
+    readContextCleanReceipt({ stateDir: params.stateDir, planId: params.claim.cleanPlanId }),
+  ]);
+  if (plan.bypassed || receipt.bypassed || !plan.value || !receipt.value
+    || plan.value.plan.sessionId !== params.claim.sessionId
+    || receipt.value.sessionId !== params.claim.sessionId) return;
+
+  const terminal = terminalStatus(receipt.value.status);
+  if (terminal) {
+    await finalizeDshCleanerSchedule({
+      stateDir: params.stateDir,
+      sessionId: params.claim.sessionId,
+      cleanPlanId: params.claim.cleanPlanId,
+      receiptStatus: terminal,
+      reasons: receipt.value.reasons,
+      updatedAt: receipt.value.updatedAt,
+      claimId: params.claim.claimId,
+    });
+    return;
+  }
+
+  const claimedAt = Date.parse(params.claim.claimedAt);
+  if (receipt.value.status !== "scheduled"
+    || !Number.isFinite(claimedAt)
+    || Date.now() - claimedAt < CLAIM_RECOVERY_AFTER_MS) return;
+
+  const failed = {
+    ...(receipt.value as ContextCleanScheduledReceipt),
+    status: "failed" as const,
+    reasons: ["dsh_cleaner_claim_abandoned"],
+    updatedAt: new Date().toISOString(),
+  };
+  const executionBridge = createDshCleanerExecutionBridge({
+    stateDir: params.stateDir,
+    sessions: sessionStore(params.session),
+    loadRegistry: (sessionId) => loadSessionTaskRegistry(params.stateDir, sessionId),
+  });
+  const saved = await executionBridge.recordCleanReceipt(failed);
+  if (saved.bypassed) return;
+  await finalizeDshCleanerSchedule({
+    stateDir: params.stateDir,
+    sessionId: params.claim.sessionId,
+    cleanPlanId: params.claim.cleanPlanId,
+    receiptStatus: "failed",
+    reasons: failed.reasons,
+    updatedAt: failed.updatedAt,
+    claimId: params.claim.claimId,
+  });
+}
+
 /** Attach scheduled Cleaner execution at the front of DSH's pre-step waterfall. */
 export function registerDshCleanerPreStep(
   ctx: DshPluginContext,
@@ -102,6 +161,14 @@ export function registerDshCleanerPreStep(
 
       const session = payload.agent.session;
       const scheduled = await readDshCleanerSchedule({ stateDir, sessionId: session.id });
+      if (scheduled.outcome === "claimed") {
+        await reconcileClaimedSchedule({
+          stateDir,
+          claim: scheduled.record,
+          session: session as unknown as DshCleanSnapshotSession,
+        });
+        return next();
+      }
       if (scheduled.outcome !== "ready") return next();
 
       if (!await isSharedScheduleReady({
@@ -168,47 +235,37 @@ export function registerDshCleanerPreStep(
           });
         }
       } else if (outcome.outcome === "stale") {
-        await finalizeDshCleanerSchedule({
-          stateDir,
-          sessionId: session.id,
-          cleanPlanId: claim.cleanPlanId,
-          receiptStatus: "stale",
-          reasons: outcome.receipt?.reasons ?? outcome.reasons,
-          ...(outcome.receipt ? { updatedAt: outcome.receipt.updatedAt } : {}),
-          claimId: claim.claimId,
-        });
+        if (outcome.receipt) {
+          await finalizeDshCleanerSchedule({
+            stateDir,
+            sessionId: session.id,
+            cleanPlanId: claim.cleanPlanId,
+            receiptStatus: "stale",
+            reasons: outcome.receipt.reasons,
+            updatedAt: outcome.receipt.updatedAt,
+            claimId: claim.claimId,
+          });
+        }
       } else if (outcome.outcome === "failed") {
         if (outcome.surfaceChanged) ctx.tokenMeter.measure(session);
-        await finalizeDshCleanerSchedule({
-          stateDir,
-          sessionId: session.id,
-          cleanPlanId: claim.cleanPlanId,
-          receiptStatus: "failed",
-          reasons: outcome.receipt?.reasons ?? outcome.reasons,
-          ...(outcome.receipt ? { updatedAt: outcome.receipt.updatedAt } : {}),
-          claimId: claim.claimId,
-        });
-      } else if (outcome.outcome === "skipped") {
-        // A claim has already been persisted. Preserve at-most-once semantics
-        // even for an unexpected non-terminal prepare outcome.
-        await finalizeDshCleanerSchedule({
-          stateDir,
-          sessionId: session.id,
-          cleanPlanId: claim.cleanPlanId,
-          receiptStatus: "failed",
-          reasons: outcome.reasons.length > 0 ? outcome.reasons : ["clean_prepare_skipped"],
-          claimId: claim.claimId,
-        });
+        if (outcome.receipt) {
+          await finalizeDshCleanerSchedule({
+            stateDir,
+            sessionId: session.id,
+            cleanPlanId: claim.cleanPlanId,
+            receiptStatus: "failed",
+            reasons: outcome.receipt.reasons,
+            updatedAt: outcome.receipt.updatedAt,
+            claimId: claim.claimId,
+          });
+        }
       }
     } catch {
       if (claim) {
-        await finalizeDshCleanerSchedule({
+        await reconcileClaimedSchedule({
           stateDir,
-          sessionId: payload.agent.session.id,
-          cleanPlanId: claim.cleanPlanId,
-          receiptStatus: "failed",
-          reasons: ["dsh_cleaner_runtime_error"],
-          claimId: claim.claimId,
+          claim,
+          session: payload.agent.session as unknown as DshCleanSnapshotSession,
         }).catch(() => undefined);
       }
       // The Cleaner is an optimization. State/session/registry failures must

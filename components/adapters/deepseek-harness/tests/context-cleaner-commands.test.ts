@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  readContextCleanReceipt,
+  transitionContextCleanState,
+} from "@lightrsi/cleaner";
+import {
   applySessionTaskRegistryPatch,
   createEmptySessionTaskRegistry,
   persistSessionTaskRegistry,
@@ -19,9 +23,11 @@ import {
   type ContextCleanerCommandContext,
 } from "../src/context-cleaner/commands.js";
 import {
+  claimDshCleanerSchedule,
   readDshCleanerSchedule,
   scheduleDshCleanerPlan,
 } from "../src/context-cleaner/scheduler.js";
+import { buildDshCleanSnapshot, surfaceRevision } from "../src/context-cleaner/snapshot.js";
 import { normalizeDshConfig } from "../src/config.js";
 import * as adapterPlugin from "../src/index.js";
 import type {
@@ -175,6 +181,22 @@ function planIdFrom(text: string | undefined): string {
 }
 
 describe("Context Cleaner DSH command", () => {
+  it("counts nested DSH tool-result text in Cleaner accounting", () => {
+    const session = makeSession("context-cleaner-tool-count-test", true);
+    const built = buildDshCleanSnapshot({
+      session,
+      registry: completedRegistry(session),
+      revision: surfaceRevision(session),
+    });
+    const result = built.snapshot.items.find((item) => item.stableId === "event-4-tool-result");
+
+    assert.equal(result?.chars, 40);
+    assert.equal(
+      built.itemTextByStableId["event-4-tool-result"],
+      "The price lookup completed successfully.",
+    );
+  });
+
   it("keeps the root plugin headless-loadable and mounts optional services through Cordis injections", () => {
     const unwrapExports = (exports: Record<string, unknown>) => exports.default ?? exports;
     assert.equal("default" in adapterPlugin, false);
@@ -459,6 +481,104 @@ describe("Context Cleaner DSH command", () => {
       assert.deepEqual(session.surface.nodes, [2, 3]);
       const after = await readDshCleanerSchedule({ stateDir, sessionId: session.id });
       assert.equal(after.outcome, "ready", "the pointer remains retryable after a shared-store failure");
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers an abandoned claim into matching failed terminal states", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-dsh-cleaner-"));
+    try {
+      const session = makeSession("context-cleaner-abandoned-claim-test");
+      await persistSessionTaskRegistry(stateDir, completedRegistry(session), { expectedVersion: 0 });
+      const context: ContextCleanerCommandContext = { commands: { register: () => () => {} } };
+      const config = configured(stateDir);
+      const dependencies = { now: () => "2026-09-18T00:00:00.000Z" };
+      const analysis = await executeContextCleanerCommand(context, config, invocation(session, ""), dependencies);
+      const planId = planIdFrom(analysis.text);
+      await executeContextCleanerCommand(
+        context,
+        config,
+        invocation(session, `--plan ${planId} --select meal-plan`),
+        dependencies,
+      );
+      const claim = await claimDshCleanerSchedule({
+        stateDir,
+        sessionId: session.id,
+        cleanPlanId: planId,
+        claimedAt: "2026-09-18T00:00:01.000Z",
+      });
+      assert.equal(claim.outcome, "claimed");
+
+      const handlers: Handler[] = [];
+      registerDshCleanerPreStep({
+        on: (_event, handler) => { handlers.push(handler as Handler); },
+        tokenMeter: { measure: () => {} },
+      }, config, createDshCleanerPreStepState());
+      await handlers[0]!({
+        agent: { session }, messages: [], turn: 2, step: 0, signal: { aborted: false },
+      }, async () => ({ kind: "enter", messages: [] }));
+
+      const pointer = await readDshCleanerSchedule({ stateDir, sessionId: session.id });
+      assert.equal(pointer.outcome, "terminal");
+      if (pointer.outcome === "terminal") assert.equal(pointer.record.receiptStatus, "failed");
+      const status = await executeContextCleanerCommand(
+        context,
+        config,
+        invocation(session, `--status ${planId}`),
+        dependencies,
+      );
+      assert.match(status.text ?? "", /status: failed/u);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs a claimed pointer from an existing shared terminal receipt", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "lightrsi-dsh-cleaner-"));
+    try {
+      const session = makeSession("context-cleaner-terminal-reconcile-test");
+      await persistSessionTaskRegistry(stateDir, completedRegistry(session), { expectedVersion: 0 });
+      const context: ContextCleanerCommandContext = { commands: { register: () => () => {} } };
+      const config = configured(stateDir);
+      const dependencies = { now: () => "2026-09-18T00:00:00.000Z" };
+      const analysis = await executeContextCleanerCommand(context, config, invocation(session, ""), dependencies);
+      const planId = planIdFrom(analysis.text);
+      await executeContextCleanerCommand(
+        context,
+        config,
+        invocation(session, `--plan ${planId} --select meal-plan`),
+        dependencies,
+      );
+      const claim = await claimDshCleanerSchedule({ stateDir, sessionId: session.id, cleanPlanId: planId });
+      assert.equal(claim.outcome, "claimed");
+      const scheduled = await readContextCleanReceipt({ stateDir, planId });
+      assert.equal(scheduled.value?.status, "scheduled");
+      await transitionContextCleanState({
+        stateDir,
+        receipt: {
+          ...scheduled.value!,
+          status: "failed",
+          reasons: ["simulated_terminal_write_before_local_finalize"],
+          updatedAt: "2026-09-18T00:00:02.000Z",
+        },
+      });
+
+      const handlers: Handler[] = [];
+      registerDshCleanerPreStep({
+        on: (_event, handler) => { handlers.push(handler as Handler); },
+        tokenMeter: { measure: () => {} },
+      }, config, createDshCleanerPreStepState());
+      await handlers[0]!({
+        agent: { session }, messages: [], turn: 2, step: 0, signal: { aborted: false },
+      }, async () => ({ kind: "enter", messages: [] }));
+
+      const pointer = await readDshCleanerSchedule({ stateDir, sessionId: session.id });
+      assert.equal(pointer.outcome, "terminal");
+      if (pointer.outcome === "terminal") {
+        assert.equal(pointer.record.receiptStatus, "failed");
+        assert.deepEqual(pointer.record.reasons, ["simulated_terminal_write_before_local_finalize"]);
+      }
     } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
